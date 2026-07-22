@@ -13,6 +13,8 @@ import (
 
 	"github.com/lokeshbm/goride/internal/config"
 	"github.com/lokeshbm/goride/internal/httpapi"
+	"github.com/lokeshbm/goride/internal/quotes"
+	"github.com/lokeshbm/goride/internal/rides"
 	"github.com/lokeshbm/goride/internal/store"
 )
 
@@ -31,8 +33,14 @@ func main() {
 	}
 	defer st.Close()
 
+	quoteSvc := quotes.NewService(st, logger)
+	rideSvc := rides.NewService(st, quoteSvc, logger)
+
 	router := httpapi.NewRouter(httpapi.Deps{
 		Health: st,
+		Store:  st,
+		Quotes: quoteSvc,
+		Rides:  rideSvc,
 		Logger: logger,
 	})
 
