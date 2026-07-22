@@ -47,10 +47,13 @@ const (
 	uniqueViolation = "23505"
 )
 
-// EventPublisher receives a domain event on every ride status change. M5 wires
-// this to the SSE/Redis pub-sub hub; the default is a no-op.
+// EventPublisher receives domain events. M5 wires this to the SSE/Redis pub-sub
+// hub; the default is a no-op. PublishRideEvent targets a ride channel
+// (events:ride:{id}); PublishDriverEvent targets a driver channel
+// (events:driver:{id}) and carries offers/assignments (added in M3).
 type EventPublisher interface {
 	PublishRideEvent(ctx context.Context, rideID, eventType string, data any) error
+	PublishDriverEvent(ctx context.Context, driverID, eventType string, data any) error
 }
 
 // NoopPublisher discards events. Default until M5.
@@ -58,6 +61,9 @@ type NoopPublisher struct{}
 
 // PublishRideEvent implements EventPublisher.
 func (NoopPublisher) PublishRideEvent(context.Context, string, string, any) error { return nil }
+
+// PublishDriverEvent implements EventPublisher.
+func (NoopPublisher) PublishDriverEvent(context.Context, string, string, any) error { return nil }
 
 // DriverCard is the assigned-driver summary returned with a ride.
 type DriverCard struct {
@@ -246,6 +252,71 @@ func (s *Service) Cancel(ctx context.Context, id, actorID, actorRole, reason str
 		s.OnDriverReleased(ctx, *driverID)
 	}
 
+	return s.load(ctx, id)
+}
+
+// Expire transitions a MATCHING ride to EXPIRED via the funnel. Used by the
+// matching sweeper when candidates are exhausted / the 60s TTL passes. The
+// guarded UPDATE makes it safe to call post-commit and from any instance;
+// ErrInvalidState (already advanced/terminal) is returned if the ride left
+// MATCHING in the meantime.
+func (s *Service) Expire(ctx context.Context, id string) error {
+	return s.updateStatus(ctx, id, []Status{StatusMatching}, StatusExpired, nil)
+}
+
+// Arriving transitions DRIVER_ASSIGNED → DRIVER_ARRIVING for the assigned
+// driver. Rejects a non-assigned actor (ErrForbidden).
+func (s *Service) Arriving(ctx context.Context, id, driverID string) (*View, error) {
+	return s.driverProgress(ctx, id, driverID, []Status{StatusDriverAssigned}, StatusDriverArriving)
+}
+
+// Arrived transitions DRIVER_ARRIVING → ARRIVED for the assigned driver.
+func (s *Service) Arrived(ctx context.Context, id, driverID string) (*View, error) {
+	return s.driverProgress(ctx, id, driverID, []Status{StatusDriverArriving}, StatusArrived)
+}
+
+// driverProgress verifies the actor is the ride's assigned driver, then runs a
+// guarded transition through the funnel.
+func (s *Service) driverProgress(ctx context.Context, id, driverID string, from []Status, to Status) (*View, error) {
+	var assigned *string
+	err := s.st.PG.QueryRow(ctx, `SELECT driver_id FROM rides WHERE id = $1`, id).Scan(&assigned)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("rides: progress load: %w", err)
+	}
+	if assigned == nil || *assigned != driverID {
+		return nil, ErrForbidden
+	}
+	if err := s.updateStatus(ctx, id, from, to, nil); err != nil {
+		return nil, err
+	}
+	return s.load(ctx, id)
+}
+
+// InvalidateCache deletes the read-through cache entry for a ride. Exported for
+// the matching engine, which assigns drivers in its own transaction (not via
+// the funnel) and must invalidate the cache post-commit.
+func (s *Service) InvalidateCache(ctx context.Context, id string) error {
+	return s.st.Redis.Del(ctx, cacheKey(id)).Err()
+}
+
+// PublishRide publishes an event onto a ride channel via the configured
+// publisher. Exported so the matching engine can emit assignment/OTP events.
+func (s *Service) PublishRide(ctx context.Context, id, eventType string, data any) error {
+	return s.events.PublishRideEvent(ctx, id, eventType, data)
+}
+
+// PublishDriver publishes an event onto a driver channel (offers/assignments).
+func (s *Service) PublishDriver(ctx context.Context, driverID, eventType string, data any) error {
+	return s.events.PublishDriverEvent(ctx, driverID, eventType, data)
+}
+
+// LoadView loads a ride view straight from Postgres with no authorization
+// check. Exported for internal callers (matching) that have already authorized
+// the actor by other means.
+func (s *Service) LoadView(ctx context.Context, id string) (*View, error) {
 	return s.load(ctx, id)
 }
 

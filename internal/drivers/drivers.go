@@ -1,0 +1,366 @@
+// Package drivers owns the driver domain: availability transitions and the
+// location-ingestion hot path, plus the Redis "mirrors" that let the matching
+// engine and the location path avoid Postgres entirely.
+//
+// Source of truth: Postgres `drivers.status` is authoritative. The Redis
+// mirrors (`driver:status:{id}`, `driver:ride:{id}`) are a rebuildable cache
+// maintained at every place driver status changes (availability here,
+// assignment/release in the matching engine). If Redis is flushed the mirrors
+// are lost but the system self-heals: a driver simply re-goes-available (which
+// rewrites the mirror) and the next ping re-GEOADDs.
+package drivers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/lokeshbm/goride/internal/store"
+)
+
+// Domain errors, mapped to HTTP codes by the handler layer.
+var (
+	ErrNotFound     = errors.New("drivers: not found")
+	ErrInvalidState = errors.New("drivers: invalid state")
+	ErrRateLimited  = errors.New("drivers: rate limited")
+)
+
+// Driver status values (Postgres CHECK constraint + Redis mirror).
+const (
+	StatusOffline   = "offline"
+	StatusAvailable = "available"
+	StatusOnTrip    = "on_trip"
+)
+
+const (
+	// maxPingsPerSec caps location pings per driver (SPEC: 3/sec).
+	maxPingsPerSec = 3
+	// lastTTL is the freshness window for a driver's last known position.
+	lastTTL = 30 * time.Second
+	// locPubTTL guards the per-second ride-location publish throttle key.
+	locPubTTL = 2 * time.Second
+	// rateBucketTTL keeps the per-second rate-limit key just long enough to
+	// span the one-second window it counts (a little slack for clock skew).
+	rateBucketTTL = 2 * time.Second
+)
+
+// RidePublisher is the seam onto the rides/SSE event bus. The location hot path
+// republishes a driver's position onto the ride channel while on an active
+// ride. Defined locally (structural interface) so drivers need not import rides.
+type RidePublisher interface {
+	PublishRideEvent(ctx context.Context, rideID, eventType string, data any) error
+}
+
+// noopPublisher discards events; used until a real publisher is wired.
+type noopPublisher struct{}
+
+func (noopPublisher) PublishRideEvent(context.Context, string, string, any) error { return nil }
+
+// statusMirror is the JSON stored at driver:status:{id}. It carries everything
+// the matching search loop and the location path need about a driver without a
+// Postgres round-trip: current status, tier (for tier-match filtering) and city
+// (for the GEO key).
+type statusMirror struct {
+	Status string `json:"status"`
+	Tier   string `json:"tier"`
+	City   string `json:"city"`
+}
+
+// lastPosition is the JSON stored at driver:last:{id} (TTL 30s).
+type lastPosition struct {
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
+	Ts  int64   `json:"ts"`
+}
+
+// Service is the driver domain service.
+type Service struct {
+	st  *store.Store
+	log *slog.Logger
+	pub RidePublisher
+}
+
+// NewService constructs a driver Service with a no-op ride publisher.
+func NewService(st *store.Store, log *slog.Logger) *Service {
+	return &Service{st: st, log: log, pub: noopPublisher{}}
+}
+
+// SetPublisher overrides the no-op ride publisher (used for ride-location
+// republishing; M5 wires the real SSE hub).
+func (s *Service) SetPublisher(p RidePublisher) { s.pub = p }
+
+// ---- Redis key helpers ----
+
+func geoKey(city string) string    { return "geo:drivers:" + city }
+func lastKey(id string) string     { return "driver:last:" + id }
+func statusKey(id string) string   { return "driver:status:" + id }
+func rideKey(id string) string     { return "driver:ride:" + id }
+func offerDriver(id string) string { return "offer:driver:" + id }
+func offerRide(id string) string   { return "offer:ride:" + id }
+
+func rateKey(id string, sec int64) string {
+	return fmt.Sprintf("ratelimit:loc:%s:%d", id, sec)
+}
+
+func locPubKey(rideID string, sec int64) string {
+	return fmt.Sprintf("loc:pub:%s:%d", rideID, sec)
+}
+
+// ---- Availability ----
+
+// SetAvailability transitions a driver between offline and available. on_trip is
+// rejected (ErrInvalidState → 409). The Postgres UPDATE is optimistic and
+// idempotent: offline⇄available is allowed (re-asserting the same state is a
+// no-op), on_trip fails the WHERE clause and yields zero rows.
+//
+// Going available: refresh the status mirror, then GEOADD at the last known
+// position if it is still fresh; otherwise just mark available and let the first
+// ping GEOADD. Going offline: ZREM from the geo set and clear any outstanding
+// offer (decline semantics).
+func (s *Service) SetAvailability(ctx context.Context, driverID string, available bool) error {
+	target := StatusOffline
+	if available {
+		target = StatusAvailable
+	}
+
+	// Optimistic guarded update: only offline/available are mutable; on_trip is
+	// locked out. RETURNING gives us tier+city for the Redis ops without a
+	// second query.
+	var tier, city string
+	err := s.st.PG.QueryRow(ctx,
+		`UPDATE drivers SET status = $1
+		   WHERE id = $2 AND status IN ('offline','available')
+		 RETURNING tier, city`,
+		target, driverID,
+	).Scan(&tier, &city)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return s.availabilityRejectReason(ctx, driverID)
+	}
+	if err != nil {
+		return fmt.Errorf("drivers: set availability: %w", err)
+	}
+
+	if available {
+		return s.goAvailable(ctx, driverID, tier, city)
+	}
+	return s.goOffline(ctx, driverID, tier, city)
+}
+
+// availabilityRejectReason distinguishes a missing driver (404) from an on_trip
+// driver (409) after the guarded UPDATE affected zero rows.
+func (s *Service) availabilityRejectReason(ctx context.Context, driverID string) error {
+	var status string
+	err := s.st.PG.QueryRow(ctx, `SELECT status FROM drivers WHERE id = $1`, driverID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("drivers: availability reason: %w", err)
+	}
+	// status must be on_trip (offline/available would have matched the UPDATE).
+	return ErrInvalidState
+}
+
+func (s *Service) goAvailable(ctx context.Context, driverID, tier, city string) error {
+	// Refresh the mirror first so a ping racing in immediately sees available.
+	if err := s.writeMirror(ctx, driverID, statusMirror{Status: StatusAvailable, Tier: tier, City: city}); err != nil {
+		return err
+	}
+	// GEOADD only if we have a fresh last position; existence of the 30s-TTL key
+	// is the freshness signal.
+	raw, err := s.st.Redis.Get(ctx, lastKey(driverID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil // no fresh fix; first ping will GEOADD
+	}
+	if err != nil {
+		return fmt.Errorf("drivers: read last pos: %w", err)
+	}
+	var pos lastPosition
+	if json.Unmarshal([]byte(raw), &pos) != nil {
+		return nil
+	}
+	if err := s.st.Redis.GeoAdd(ctx, geoKey(city), &redis.GeoLocation{
+		Name: driverID, Longitude: pos.Lng, Latitude: pos.Lat,
+	}).Err(); err != nil {
+		return fmt.Errorf("drivers: geoadd on available: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) goOffline(ctx context.Context, driverID, tier, city string) error {
+	// Clear any outstanding offer (decline semantics) and remove from geo set.
+	if err := s.clearOutstandingOffer(ctx, driverID); err != nil {
+		s.log.Warn("drivers: clear offer on offline failed", "error", err, "driver_id", driverID)
+	}
+	pipe := s.st.Redis.Pipeline()
+	pipe.ZRem(ctx, geoKey(city), driverID)
+	// Keep the mirror (now offline) so the location path knows not to GEOADD.
+	m, _ := json.Marshal(statusMirror{Status: StatusOffline, Tier: tier, City: city})
+	pipe.Set(ctx, statusKey(driverID), m, 0)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("drivers: go offline redis: %w", err)
+	}
+	return nil
+}
+
+// clearOutstandingOffer removes this driver's offer keys if one is held,
+// mirroring decline semantics when the driver goes offline.
+func (s *Service) clearOutstandingOffer(ctx context.Context, driverID string) error {
+	rideID, err := s.st.Redis.GetDel(ctx, offerDriver(driverID)).Result()
+	if errors.Is(err, redis.Nil) || rideID == "" {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return s.st.Redis.Del(ctx, offerRide(rideID)).Err()
+}
+
+// ---- Mirrors used by the matching engine ----
+
+// MarkOnTrip records assignment in Redis: remove the driver from the geo set,
+// point driver:ride at the ride, and flip the status mirror to on_trip. Called
+// by the matching engine after the assignment transaction commits.
+func (s *Service) MarkOnTrip(ctx context.Context, driverID, rideID, city, tier string) error {
+	pipe := s.st.Redis.Pipeline()
+	pipe.ZRem(ctx, geoKey(city), driverID)
+	pipe.Set(ctx, rideKey(driverID), rideID, 0)
+	m, _ := json.Marshal(statusMirror{Status: StatusOnTrip, Tier: tier, City: city})
+	pipe.Set(ctx, statusKey(driverID), m, 0)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("drivers: mark on_trip: %w", err)
+	}
+	return nil
+}
+
+// Release re-adds a driver to the available pool after their ride ends or is
+// cancelled (the rides service has already set Postgres status='available').
+// It reads tier/city from Postgres (not a hot path), refreshes the mirror,
+// clears driver:ride, and GEOADDs the last known position if still fresh.
+func (s *Service) Release(ctx context.Context, driverID string) error {
+	var tier, city, status string
+	err := s.st.PG.QueryRow(ctx,
+		`SELECT tier, city, status FROM drivers WHERE id = $1`, driverID,
+	).Scan(&tier, &city, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("drivers: release load: %w", err)
+	}
+
+	pipe := s.st.Redis.Pipeline()
+	pipe.Del(ctx, rideKey(driverID))
+	m, _ := json.Marshal(statusMirror{Status: status, Tier: tier, City: city})
+	pipe.Set(ctx, statusKey(driverID), m, 0)
+	lastCmd := pipe.Get(ctx, lastKey(driverID))
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("drivers: release redis: %w", err)
+	}
+
+	// GEOADD only when available and we still have a fresh fix.
+	if status != StatusAvailable {
+		return nil
+	}
+	raw, err := lastCmd.Result()
+	if errors.Is(err, redis.Nil) {
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+	var pos lastPosition
+	if json.Unmarshal([]byte(raw), &pos) != nil {
+		return nil
+	}
+	if err := s.st.Redis.GeoAdd(ctx, geoKey(city), &redis.GeoLocation{
+		Name: driverID, Longitude: pos.Lng, Latitude: pos.Lat,
+	}).Err(); err != nil {
+		return fmt.Errorf("drivers: release geoadd: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) writeMirror(ctx context.Context, driverID string, m statusMirror) error {
+	raw, _ := json.Marshal(m)
+	if err := s.st.Redis.Set(ctx, statusKey(driverID), raw, 0).Err(); err != nil {
+		return fmt.Errorf("drivers: write status mirror: %w", err)
+	}
+	return nil
+}
+
+// ---- Location ingestion (hot path) ----
+
+// UpdateLocation is the location-ingestion hot path: zero Postgres, two Redis
+// round-trips.
+//
+// Round-trip 1 (pipeline): token-bucket rate limit + read the status/ride
+// mirrors. Rate limiting uses a per-second INCR key (INCR + EXPIRE) rather than
+// a sliding token bucket — it is the simplest correct form: the Nth ping within
+// a given wall-clock second increments the counter to N, and anything past
+// maxPingsPerSec is rejected. Bucket boundaries reset each second, which is
+// exactly the "max 3/sec" contract.
+//
+// Round-trip 2 (pipeline): SET driver:last (EX 30); GEOADD to the city set iff
+// the mirror says available; and, iff on an active ride, claim a 1/sec publish
+// token so the position is republished onto the ride channel at most once per
+// second for rider tracking.
+func (s *Service) UpdateLocation(ctx context.Context, driverID string, lat, lng float64) error {
+	now := time.Now()
+	sec := now.Unix()
+
+	// --- round-trip 1: rate limit + mirror reads ---
+	p1 := s.st.Redis.Pipeline()
+	incr := p1.Incr(ctx, rateKey(driverID, sec))
+	p1.Expire(ctx, rateKey(driverID, sec), rateBucketTTL)
+	statusCmd := p1.Get(ctx, statusKey(driverID))
+	rideCmd := p1.Get(ctx, rideKey(driverID))
+	if _, err := p1.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("drivers: location rt1: %w", err)
+	}
+	if incr.Val() > maxPingsPerSec {
+		return ErrRateLimited
+	}
+
+	var mirror statusMirror
+	if raw, err := statusCmd.Result(); err == nil {
+		_ = json.Unmarshal([]byte(raw), &mirror)
+	}
+	rideID := rideCmd.Val() // "" if not on a ride
+	onRide := rideID != ""
+
+	// --- round-trip 2: persist position + conditional GEOADD + publish token ---
+	posJSON, _ := json.Marshal(lastPosition{Lat: lat, Lng: lng, Ts: sec})
+	p2 := s.st.Redis.Pipeline()
+	p2.Set(ctx, lastKey(driverID), posJSON, lastTTL)
+	if mirror.Status == StatusAvailable && mirror.City != "" {
+		p2.GeoAdd(ctx, geoKey(mirror.City), &redis.GeoLocation{
+			Name: driverID, Longitude: lng, Latitude: lat,
+		})
+	}
+	var pubTokenCmd *redis.BoolCmd
+	if onRide {
+		pubTokenCmd = p2.SetNX(ctx, locPubKey(rideID, sec), "1", locPubTTL)
+	}
+	if _, err := p2.Exec(ctx); err != nil {
+		return fmt.Errorf("drivers: location rt2: %w", err)
+	}
+
+	// Publish at most once per second onto the ride channel (default no-op).
+	if onRide && pubTokenCmd != nil && pubTokenCmd.Val() {
+		if err := s.pub.PublishRideEvent(ctx, rideID, "ride.driver_location", map[string]any{
+			"driver_id": driverID,
+			"lat":       lat,
+			"lng":       lng,
+		}); err != nil {
+			s.log.Warn("drivers: publish location failed", "error", err, "ride_id", rideID)
+		}
+	}
+	return nil
+}
