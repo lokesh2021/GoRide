@@ -12,9 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// maxIdempotentBody caps the request body we buffer for hashing/replay.
-const maxIdempotentBody = 1 << 20 // 1 MiB
-
 // idempotency wraps a mutating handler with Idempotency-Key semantics per SPEC:
 //   - Requires the Idempotency-Key header (400 IDEMPOTENCY_KEY_REQUIRED if absent).
 //   - Key is scoped by (key, actor_id, endpoint); request hash = SHA256 of
@@ -32,18 +29,18 @@ func (deps Deps) idempotency(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Idempotency-Key")
 		if key == "" {
-			WriteErr(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key header is required")
+			WriteErr(w, http.StatusBadRequest, CodeIdempotencyKeyRequired, "Idempotency-Key header is required")
 			return
 		}
 		actor, ok := ActorFrom(r.Context())
 		if !ok {
-			WriteErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			WriteErr(w, http.StatusUnauthorized, CodeUnauthorized, "not authenticated")
 			return
 		}
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxIdempotentBody))
 		if err != nil {
-			WriteErr(w, http.StatusBadRequest, "VALIDATION_FAILED", "unable to read request body")
+			WriteErr(w, http.StatusBadRequest, CodeValidationFailed, "unable to read request body")
 			return
 		}
 		_ = r.Body.Close()
@@ -56,13 +53,13 @@ func (deps Deps) idempotency(next http.HandlerFunc) http.HandlerFunc {
 		// Pre-check: existing row for this (key, actor, endpoint)?
 		storedHash, status, respBody, found, err := deps.loadIdemKey(ctx, key, actor.ID, endpoint)
 		if err != nil {
-			deps.Logger.Error("idempotency: load failed", "error", err)
-			WriteErr(w, http.StatusInternalServerError, "INTERNAL", "idempotency check failed")
+			deps.Logger.Error(logMsgIdempotencyLoadFailed, "error", err)
+			WriteErr(w, http.StatusInternalServerError, CodeInternal, "idempotency check failed")
 			return
 		}
 		if found {
 			if storedHash != hash {
-				WriteErr(w, http.StatusUnprocessableEntity, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key reused with a different request body")
+				WriteErr(w, http.StatusUnprocessableEntity, CodeIdempotencyKeyReused, "Idempotency-Key reused with a different request body")
 				return
 			}
 			writeStored(w, status, respBody)
@@ -80,7 +77,7 @@ func (deps Deps) idempotency(next http.HandlerFunc) http.HandlerFunc {
 		if cw.status < 500 {
 			inserted, err := deps.insertIdemKey(ctx, key, actor.ID, endpoint, hash, cw.status, jsonOrNull(cw.body.Bytes()))
 			if err != nil {
-				deps.Logger.Error("idempotency: store failed", "error", err)
+				deps.Logger.Error(logMsgIdempotencyStoreFailed, "error", err)
 			} else if !inserted {
 				// Concurrent winner already stored a response; replay theirs.
 				if sh, st, rb, ok, rerr := deps.loadIdemKey(ctx, key, actor.ID, endpoint); rerr == nil && ok && sh == hash {

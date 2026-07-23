@@ -1,8 +1,5 @@
 package pricing
 
-// base32 is the geohash alphabet (no a, i, l, o).
-const base32 = "0123456789bcdefghjkmnpqrstuvwxyz"
-
 // Geohash encodes a lat/lng point to a geohash string of the given precision
 // (number of base32 characters), using the standard bit-interleaving algorithm.
 // No external dependency. Longitude and latitude bits are interleaved starting

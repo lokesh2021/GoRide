@@ -32,32 +32,6 @@ var (
 	ErrRateLimited  = errors.New("drivers: rate limited")
 )
 
-// Driver status values (Postgres CHECK constraint + Redis mirror).
-const (
-	StatusOffline   = "offline"
-	StatusAvailable = "available"
-	StatusOnTrip    = "on_trip"
-)
-
-const (
-	// maxPingsPerSec caps location pings per driver (SPEC: 3/sec).
-	maxPingsPerSec = 3
-	// lastTTL is the freshness window for a driver's last known position.
-	lastTTL = 30 * time.Second
-	// locPubTTL guards the per-second ride-location publish throttle key.
-	locPubTTL = 2 * time.Second
-	// rateBucketTTL keeps the per-second rate-limit key just long enough to
-	// span the one-second window it counts (a little slack for clock skew).
-	rateBucketTTL = 2 * time.Second
-	// tripDistTTL bounds the lifetime of the per-ride metered-distance counter
-	// so an abandoned trip's key cannot linger forever (trip end DELs it).
-	tripDistTTL = 2 * time.Hour
-	// maxPingDeltaM is the teleport filter: a single ping cannot legitimately
-	// move a city driver more than ~200m within its (sub-)second cadence, so a
-	// larger jump is a spurious GPS fix and is excluded from metered distance.
-	maxPingDeltaM = 200.0
-)
-
 // RidePublisher is the seam onto the rides/SSE event bus. The location hot path
 // republishes a driver's position onto the ride channel while on an active
 // ride. Defined locally (structural interface) so drivers need not import rides.
@@ -102,25 +76,6 @@ func NewService(st *store.Store, log *slog.Logger) *Service {
 // SetPublisher overrides the no-op ride publisher (used for ride-location
 // republishing; M5 wires the real SSE hub).
 func (s *Service) SetPublisher(p RidePublisher) { s.pub = p }
-
-// ---- Redis key helpers ----
-
-func geoKey(city string) string    { return "geo:drivers:" + city }
-func lastKey(id string) string     { return "driver:last:" + id }
-func statusKey(id string) string   { return "driver:status:" + id }
-func rideKey(id string) string     { return "driver:ride:" + id }
-func offerDriver(id string) string { return "offer:driver:" + id }
-func offerRide(id string) string   { return "offer:ride:" + id }
-
-func rateKey(id string, sec int64) string {
-	return fmt.Sprintf("ratelimit:loc:%s:%d", id, sec)
-}
-
-func locPubKey(rideID string, sec int64) string {
-	return fmt.Sprintf("loc:pub:%s:%d", rideID, sec)
-}
-
-func tripDistKey(rideID string) string { return "trip:dist:" + rideID }
 
 // meteredPingDelta returns the haversine distance (metres) between the previous
 // and current fix and whether it should count toward metered trip distance. A
@@ -215,7 +170,7 @@ func (s *Service) goAvailable(ctx context.Context, driverID, tier, city string) 
 func (s *Service) goOffline(ctx context.Context, driverID, tier, city string) error {
 	// Clear any outstanding offer (decline semantics) and remove from geo set.
 	if err := s.clearOutstandingOffer(ctx, driverID); err != nil {
-		s.log.Warn("drivers: clear offer on offline failed", "error", err, "driver_id", driverID)
+		s.log.Warn(logMsgClearOfferOnOfflineFailed, "error", err, "driver_id", driverID)
 	}
 	pipe := s.st.Redis.Pipeline()
 	pipe.ZRem(ctx, geoKey(city), driverID)
@@ -318,7 +273,7 @@ func (s *Service) ReadAndClearTripDistance(ctx context.Context, rideID string) (
 		return 0, false
 	}
 	if err := s.st.Redis.Del(ctx, tripDistKey(rideID)).Err(); err != nil {
-		s.log.Warn("drivers: clear trip distance failed", "error", err, "ride_id", rideID)
+		s.log.Warn(logMsgClearTripDistanceFailed, "error", err, "ride_id", rideID)
 	}
 	if raw <= 0 {
 		return 0, false
@@ -413,12 +368,12 @@ func (s *Service) UpdateLocation(ctx context.Context, driverID string, lat, lng 
 
 	// Publish at most once per second onto the ride channel (default no-op).
 	if onRide && pubTokenCmd != nil && pubTokenCmd.Val() {
-		if err := s.pub.PublishRideEvent(ctx, rideID, "ride.driver_location", map[string]any{
+		if err := s.pub.PublishRideEvent(ctx, rideID, eventRideDriverLocation, map[string]any{
 			"driver_id": driverID,
 			"lat":       lat,
 			"lng":       lng,
 		}); err != nil {
-			s.log.Warn("drivers: publish location failed", "error", err, "ride_id", rideID)
+			s.log.Warn(logMsgPublishLocationFailed, "error", err, "ride_id", rideID)
 		}
 	}
 	return nil

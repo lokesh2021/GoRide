@@ -11,10 +11,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// heartbeatInterval is how often Serve writes a comment frame to keep idle
-// connections (and any proxy in between) alive.
-const heartbeatInterval = 15 * time.Second
-
 // Hub streams Redis pub/sub channels to SSE clients, one subscription per HTTP
 // connection.
 //
@@ -67,7 +63,7 @@ func (h *Hub) Serve(reqCtx context.Context, w io.Writer, flush func(), channel s
 	sub := h.rdb.Subscribe(ctx, channel)
 	defer func() {
 		if err := sub.Close(); err != nil {
-			h.log.Warn("events: subscription close failed", "error", err, "channel", channel)
+			h.log.Warn(logMsgSubscriptionCloseFailed, "error", err, "channel", channel)
 		}
 	}()
 

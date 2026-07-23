@@ -85,15 +85,15 @@ func tripRideID(w http.ResponseWriter, r *http.Request) (string, bool) {
 func writeTripErr(w http.ResponseWriter, deps Deps, op string, err error) {
 	switch {
 	case errors.Is(err, trips.ErrNotFound):
-		WriteErr(w, http.StatusNotFound, "NOT_FOUND", "ride not found")
+		WriteErr(w, http.StatusNotFound, CodeNotFound, "ride not found")
 	case errors.Is(err, trips.ErrForbidden):
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "not the assigned driver for this ride")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "not the assigned driver for this ride")
 	case errors.Is(err, trips.ErrInvalidOTP):
-		WriteErr(w, http.StatusUnprocessableEntity, "INVALID_OTP", "otp does not match")
+		WriteErr(w, http.StatusUnprocessableEntity, CodeInvalidOTP, "otp does not match")
 	case errors.Is(err, trips.ErrInvalidState):
-		WriteErr(w, http.StatusConflict, "INVALID_STATE", "trip is not in a valid state for this action")
+		WriteErr(w, http.StatusConflict, CodeInvalidState, "trip is not in a valid state for this action")
 	default:
 		deps.Logger.Error(op+" failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "internal error")
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "internal error")
 	}
 }

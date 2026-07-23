@@ -34,19 +34,6 @@ var (
 	ErrPaymentMethodBad = errors.New("rides: invalid payment method")
 )
 
-// Roles used for authorization.
-const (
-	RoleRider  = "rider"
-	RoleDriver = "driver"
-)
-
-const (
-	cacheKeyPrefix = "ride:cache:"
-	cacheTTL       = 60 * time.Second
-	// uniqueViolation is the Postgres SQLSTATE for a unique constraint breach.
-	uniqueViolation = "23505"
-)
-
 // EventPublisher receives domain events. M5 wires this to the SSE/Redis pub-sub
 // hub; the default is a no-op. PublishRideEvent targets a ride channel
 // (events:ride:{id}); PublishDriverEvent targets a driver channel
@@ -355,10 +342,10 @@ func (s *Service) updateStatus(ctx context.Context, id string, fromStates []Stat
 
 	// Write-through cache invalidation + event publish, post-commit.
 	if err := s.st.Redis.Del(ctx, cacheKey(id)).Err(); err != nil {
-		s.log.Warn("rides: cache invalidate failed", "error", err, "ride_id", id)
+		s.log.Warn(logMsgCacheInvalidateFailed, "error", err, "ride_id", id)
 	}
-	if err := s.events.PublishRideEvent(ctx, id, "ride.status_changed", map[string]any{"status": string(to)}); err != nil {
-		s.log.Warn("rides: publish event failed", "error", err, "ride_id", id)
+	if err := s.events.PublishRideEvent(ctx, id, eventRideStatusChanged, map[string]any{"status": string(to)}); err != nil {
+		s.log.Warn(logMsgPublishEventFailed, "error", err, "ride_id", id)
 	}
 	return nil
 }
@@ -378,7 +365,7 @@ func (s *Service) cachedLoad(ctx context.Context, id string) (*View, error) {
 	}
 	if raw, err := json.Marshal(v); err == nil {
 		if err := s.st.Redis.Set(ctx, cacheKey(id), raw, cacheTTL).Err(); err != nil {
-			s.log.Warn("rides: cache set failed", "error", err, "ride_id", id)
+			s.log.Warn(logMsgCacheSetFailed, "error", err, "ride_id", id)
 		}
 	}
 	return v, nil
@@ -437,8 +424,6 @@ func authorized(v *View, actorID, actorRole string) bool {
 		return false
 	}
 }
-
-func cacheKey(id string) string { return cacheKeyPrefix + id }
 
 func statusStrings(ss []Status) []string {
 	out := make([]string, len(ss))

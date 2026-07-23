@@ -25,16 +25,16 @@ func (deps Deps) streamRideEvents(w http.ResponseWriter, r *http.Request) {
 
 	v, err := deps.Rides.LoadView(r.Context(), rideID)
 	if errors.Is(err, rides.ErrNotFound) {
-		WriteErr(w, http.StatusNotFound, "NOT_FOUND", "ride not found")
+		WriteErr(w, http.StatusNotFound, CodeNotFound, "ride not found")
 		return
 	}
 	if err != nil {
-		deps.Logger.Error("streamRideEvents load failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not load ride")
+		deps.Logger.Error(logMsgStreamRideEventsFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not load ride")
 		return
 	}
 	if !canStreamRide(v, actor) {
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "not permitted to stream this ride's events")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "not permitted to stream this ride's events")
 		return
 	}
 
@@ -74,7 +74,7 @@ func canStreamRide(v *rides.View, actor Actor) bool {
 func (deps Deps) serveSSE(w http.ResponseWriter, r *http.Request, channel string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "streaming unsupported")
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "streaming unsupported")
 		return
 	}
 
@@ -87,6 +87,6 @@ func (deps Deps) serveSSE(w http.ResponseWriter, r *http.Request, channel string
 	flusher.Flush()
 
 	if err := deps.Events.Serve(r.Context(), w, flusher.Flush, channel); err != nil {
-		deps.Logger.Warn("events: stream ended", "error", err, "channel", channel)
+		deps.Logger.Warn(logMsgEventsStreamEnded, "error", err, "channel", channel)
 	}
 }

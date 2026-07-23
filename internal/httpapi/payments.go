@@ -13,9 +13,6 @@ import (
 	"github.com/lokeshbm/goride/internal/rides"
 )
 
-// maxWebhookBody caps the PSP webhook body we buffer for HMAC verification.
-const maxWebhookBody = 1 << 16 // 64 KiB
-
 // paymentRequest is the body for POST /v1/payments.
 type paymentRequest struct {
 	RideID string `json:"ride_id"`
@@ -53,18 +50,18 @@ func (deps Deps) triggerPayment(w http.ResponseWriter, r *http.Request) {
 func (deps Deps) pspWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody))
 	if err != nil {
-		WriteErr(w, http.StatusBadRequest, "VALIDATION_FAILED", "unable to read request body")
+		WriteErr(w, http.StatusBadRequest, CodeValidationFailed, "unable to read request body")
 		return
 	}
 	sig := r.Header.Get("X-PSP-Signature")
 	if !deps.Payments.VerifySignature(body, sig) {
-		WriteErr(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "webhook signature verification failed")
+		WriteErr(w, http.StatusUnauthorized, CodeInvalidSignature, "webhook signature verification failed")
 		return
 	}
 
 	var req webhookRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		WriteErr(w, http.StatusBadRequest, "VALIDATION_FAILED", "invalid webhook body")
+		WriteErr(w, http.StatusBadRequest, CodeValidationFailed, "invalid webhook body")
 		return
 	}
 	if req.PSPRef == "" {
@@ -74,11 +71,11 @@ func (deps Deps) pspWebhook(w http.ResponseWriter, r *http.Request) {
 
 	if err := deps.Payments.HandleWebhook(r.Context(), req.PSPRef, req.Status); err != nil {
 		if errors.Is(err, payments.ErrNotFound) {
-			WriteErr(w, http.StatusNotFound, "NOT_FOUND", "no payment for psp_ref")
+			WriteErr(w, http.StatusNotFound, CodeNotFound, "no payment for psp_ref")
 			return
 		}
-		deps.Logger.Error("pspWebhook failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not process webhook")
+		deps.Logger.Error(logMsgPspWebhookFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not process webhook")
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -93,14 +90,14 @@ func (deps Deps) riderHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if actor.Role != rides.RoleRider || actor.ID != id {
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "rider may only read their own history")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "rider may only read their own history")
 		return
 	}
 
 	items, err := deps.Payments.History(r.Context(), id)
 	if err != nil {
-		deps.Logger.Error("riderHistory failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not load history")
+		deps.Logger.Error(logMsgRiderHistoryFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not load history")
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"rides": items})
@@ -110,15 +107,15 @@ func (deps Deps) riderHistory(w http.ResponseWriter, r *http.Request) {
 func writePaymentErr(w http.ResponseWriter, deps Deps, op string, err error) {
 	switch {
 	case errors.Is(err, payments.ErrNotFound):
-		WriteErr(w, http.StatusNotFound, "NOT_FOUND", "ride or payment not found")
+		WriteErr(w, http.StatusNotFound, CodeNotFound, "ride or payment not found")
 	case errors.Is(err, payments.ErrForbidden):
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "not permitted to pay for this ride")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "not permitted to pay for this ride")
 	case errors.Is(err, payments.ErrRetriesExhausted):
-		WriteErr(w, http.StatusConflict, "PAYMENT_RETRIES_EXHAUSTED", "payment has exhausted its retries")
+		WriteErr(w, http.StatusConflict, CodePaymentRetriesExhausted, "payment has exhausted its retries")
 	case errors.Is(err, payments.ErrInvalidState):
-		WriteErr(w, http.StatusConflict, "INVALID_STATE", "payment is not in a payable state")
+		WriteErr(w, http.StatusConflict, CodeInvalidState, "payment is not in a payable state")
 	default:
 		deps.Logger.Error(op+" failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "internal error")
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "internal error")
 	}
 }

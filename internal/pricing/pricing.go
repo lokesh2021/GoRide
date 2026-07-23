@@ -30,15 +30,6 @@ func ValidTier(tier string) bool {
 	return ok
 }
 
-const (
-	// roadFactor inflates straight-line distance to an approximate road path.
-	roadFactor = 1.3
-	// citySpeedKmh is the assumed average city driving speed.
-	citySpeedKmh = 22.0
-	// earthRadiusM is the mean Earth radius in metres, for haversine.
-	earthRadiusM = 6371000.0
-)
-
 // Haversine returns the great-circle distance in metres between two
 // latitude/longitude points (degrees).
 func Haversine(lat1, lng1, lat2, lng2 float64) float64 {

@@ -9,29 +9,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// CellPrecision is the geohash precision used for surge demand cells.
-const CellPrecision = 5
-
-// surgeRadiusKm is the supply-search radius around pickup (SPEC: 3km).
-const surgeRadiusKm = 3.0
-
-// demandWindow is how many minute buckets of demand to sum (SPEC: last 5min).
-const demandWindow = 5
-
-// demandTTL matches the SPEC TTL for the demand counters.
-const demandTTL = 5 * time.Minute
-
-// demandKey builds the SPEC key surge:req:{city}:{cell}:{minute}, where minute
-// is the Unix epoch minute (Unix seconds / 60).
-func demandKey(city, cell string, minute int64) string {
-	return fmt.Sprintf("surge:req:%s:%s:%d", city, cell, minute)
-}
-
-// geoKey builds the per-city available-drivers GEO key.
-func geoKey(city string) string {
-	return "geo:drivers:" + city
-}
-
 // ComputeSurge reads current surge (×100) for a pickup point: demand is the sum
 // of the last demandWindow minute buckets for the pickup's geohash cell; supply
 // is the count of available drivers within surgeRadiusKm via GEOSEARCH. The

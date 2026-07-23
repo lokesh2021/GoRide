@@ -20,9 +20,6 @@ import (
 // ErrNotFound is returned by Get when no quote matches the id.
 var ErrNotFound = errors.New("quotes: not found")
 
-// quoteTTL is how long a quote stays valid (SPEC: 3 minutes).
-const quoteTTL = 3 * time.Minute
-
 // Coord is a latitude/longitude pair in degrees.
 type Coord struct {
 	Lat float64
@@ -105,7 +102,7 @@ func (s *Service) Create(ctx context.Context, riderID string, pickup, drop Coord
 
 	// Demand signal for surge; best-effort but logged on failure.
 	if err := pricing.IncrementDemand(ctx, s.st.Redis, city, pickup.Lat, pickup.Lng, now); err != nil {
-		s.log.Warn("quotes: increment demand failed", "error", err, "quote_id", q.ID)
+		s.log.Warn(logMsgIncrementDemandFailed, "error", err, "quote_id", q.ID)
 	}
 
 	return q, nil
