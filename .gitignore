@@ -21,3 +21,4 @@ go.work.sum
 # local tooling
 .claude/
 web/.vite/
+coverage.out
