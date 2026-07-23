@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/lokeshbm/goride/internal/pricing"
 	"github.com/lokeshbm/goride/internal/store"
 )
 
@@ -48,6 +49,13 @@ const (
 	// rateBucketTTL keeps the per-second rate-limit key just long enough to
 	// span the one-second window it counts (a little slack for clock skew).
 	rateBucketTTL = 2 * time.Second
+	// tripDistTTL bounds the lifetime of the per-ride metered-distance counter
+	// so an abandoned trip's key cannot linger forever (trip end DELs it).
+	tripDistTTL = 2 * time.Hour
+	// maxPingDeltaM is the teleport filter: a single ping cannot legitimately
+	// move a city driver more than ~200m within its (sub-)second cadence, so a
+	// larger jump is a spurious GPS fix and is excluded from metered distance.
+	maxPingDeltaM = 200.0
 )
 
 // RidePublisher is the seam onto the rides/SSE event bus. The location hot path
@@ -110,6 +118,17 @@ func rateKey(id string, sec int64) string {
 
 func locPubKey(rideID string, sec int64) string {
 	return fmt.Sprintf("loc:pub:%s:%d", rideID, sec)
+}
+
+func tripDistKey(rideID string) string { return "trip:dist:" + rideID }
+
+// meteredPingDelta returns the haversine distance (metres) between the previous
+// and current fix and whether it should count toward metered trip distance. A
+// delta above maxPingDeltaM is a teleport / spurious GPS fix and is rejected
+// (count=false) so it does not corrupt the metered distance.
+func meteredPingDelta(prevLat, prevLng, lat, lng float64) (float64, bool) {
+	d := pricing.Haversine(prevLat, prevLng, lat, lng)
+	return d, d <= maxPingDeltaM
 }
 
 // ---- Availability ----
@@ -287,6 +306,26 @@ func (s *Service) Release(ctx context.Context, driverID string) error {
 	return nil
 }
 
+// ReadAndClearTripDistance returns the metered distance (metres, rounded)
+// accumulated in trip:dist:{ride_id} by the location hot path, then deletes the
+// counter. ok is false when the counter is missing or non-positive, signalling
+// the caller to fall back to the quote's estimated distance. Called by trips.End
+// (not a hot path).
+func (s *Service) ReadAndClearTripDistance(ctx context.Context, rideID string) (int, bool) {
+	raw, err := s.st.Redis.Get(ctx, tripDistKey(rideID)).Float64()
+	if err != nil {
+		// redis.Nil (never accumulated) or a parse/read error: fall back.
+		return 0, false
+	}
+	if err := s.st.Redis.Del(ctx, tripDistKey(rideID)).Err(); err != nil {
+		s.log.Warn("drivers: clear trip distance failed", "error", err, "ride_id", rideID)
+	}
+	if raw <= 0 {
+		return 0, false
+	}
+	return int(raw + 0.5), true
+}
+
 func (s *Service) writeMirror(ctx context.Context, driverID string, m statusMirror) error {
 	raw, _ := json.Marshal(m)
 	if err := s.st.Redis.Set(ctx, statusKey(driverID), raw, 0).Err(); err != nil {
@@ -301,26 +340,31 @@ func (s *Service) writeMirror(ctx context.Context, driverID string, m statusMirr
 // round-trips.
 //
 // Round-trip 1 (pipeline): token-bucket rate limit + read the status/ride
-// mirrors. Rate limiting uses a per-second INCR key (INCR + EXPIRE) rather than
-// a sliding token bucket — it is the simplest correct form: the Nth ping within
-// a given wall-clock second increments the counter to N, and anything past
-// maxPingsPerSec is rejected. Bucket boundaries reset each second, which is
-// exactly the "max 3/sec" contract.
+// mirrors + the previous fix (driver:last). Rate limiting uses a per-second
+// INCR key (INCR + EXPIRE) rather than a sliding token bucket — it is the
+// simplest correct form: the Nth ping within a given wall-clock second
+// increments the counter to N, and anything past maxPingsPerSec is rejected.
+// Bucket boundaries reset each second, which is exactly the "max 3/sec"
+// contract. Reading driver:last here (before it is overwritten in rt2) lets us
+// meter the inter-ping distance without adding a round-trip.
 //
 // Round-trip 2 (pipeline): SET driver:last (EX 30); GEOADD to the city set iff
-// the mirror says available; and, iff on an active ride, claim a 1/sec publish
-// token so the position is republished onto the ride channel at most once per
-// second for rider tracking.
+// the mirror says available; iff on an active ride, claim a 1/sec publish token
+// so the position is republished onto the ride channel at most once per second
+// for rider tracking; and, also iff on an active ride, accumulate the haversine
+// delta from the previous fix into trip:dist:{ride_id} (teleport-filtered) for
+// actual-distance fare finalization.
 func (s *Service) UpdateLocation(ctx context.Context, driverID string, lat, lng float64) error {
 	now := time.Now()
 	sec := now.Unix()
 
-	// --- round-trip 1: rate limit + mirror reads ---
+	// --- round-trip 1: rate limit + mirror reads + previous position ---
 	p1 := s.st.Redis.Pipeline()
 	incr := p1.Incr(ctx, rateKey(driverID, sec))
 	p1.Expire(ctx, rateKey(driverID, sec), rateBucketTTL)
 	statusCmd := p1.Get(ctx, statusKey(driverID))
 	rideCmd := p1.Get(ctx, rideKey(driverID))
+	lastCmd := p1.Get(ctx, lastKey(driverID))
 	if _, err := p1.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("drivers: location rt1: %w", err)
 	}
@@ -335,7 +379,15 @@ func (s *Service) UpdateLocation(ctx context.Context, driverID string, lat, lng 
 	rideID := rideCmd.Val() // "" if not on a ride
 	onRide := rideID != ""
 
-	// --- round-trip 2: persist position + conditional GEOADD + publish token ---
+	// Inter-ping distance delta from the previous fix, teleport-filtered. Only
+	// meaningful while on an active ride; computed before rt2 overwrites last.
+	var prev lastPosition
+	havePrev := false
+	if raw, err := lastCmd.Result(); err == nil {
+		havePrev = json.Unmarshal([]byte(raw), &prev) == nil
+	}
+
+	// --- round-trip 2: persist position + conditional GEOADD + publish token + metered distance ---
 	posJSON, _ := json.Marshal(lastPosition{Lat: lat, Lng: lng, Ts: sec})
 	p2 := s.st.Redis.Pipeline()
 	p2.Set(ctx, lastKey(driverID), posJSON, lastTTL)
@@ -347,6 +399,13 @@ func (s *Service) UpdateLocation(ctx context.Context, driverID string, lat, lng 
 	var pubTokenCmd *redis.BoolCmd
 	if onRide {
 		pubTokenCmd = p2.SetNX(ctx, locPubKey(rideID, sec), "1", locPubTTL)
+		if havePrev {
+			// Teleport (GPS jump) deltas are excluded from metered distance.
+			if d, count := meteredPingDelta(prev.Lat, prev.Lng, lat, lng); count {
+				p2.IncrByFloat(ctx, tripDistKey(rideID), d)
+				p2.Expire(ctx, tripDistKey(rideID), tripDistTTL)
+			}
+		}
 	}
 	if _, err := p2.Exec(ctx); err != nil {
 		return fmt.Errorf("drivers: location rt2: %w", err)
