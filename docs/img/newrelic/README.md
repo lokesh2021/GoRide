@@ -8,10 +8,8 @@ so once the files exist they render on GitHub with no further edits.
 |---|---|
 | `apm-summary.png` | APM → `goride` → Summary: response-time percentiles, throughput (rpm), error rate |
 | `transactions.png` | APM → Transactions, sorted "Most time consuming" — route-pattern names, not raw UUIDs |
-| `trace-waterfall.png` | One transaction trace: Postgres (nrpgx5) vs Redis vs app time within a request |
 | `dashboard.png` | The imported **GoRide — API Performance** dashboard (from `docs/newrelic-dashboard.json`) |
-| `alert-condition.png` | Alerts → the `goride latency` policy condition (95th percentile > 250ms / 5 min) |
-| `logs-in-context.png` | *(optional)* A transaction with its correlated slog lines (`nrslog`) |
+| `logs-in-context.png` | A transaction with its correlated slog lines (`nrslog`) |
 
 **Format:** PNG, ideally ≤ ~1600px wide. Confirm no license/ingest key is visible
 in any image before committing.

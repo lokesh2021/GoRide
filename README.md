@@ -231,7 +231,7 @@ Mapped 1:1 to the assignment:
 
 - [x] Backend code (Go) — APIs with validation + idempotency, clean state transitions, edge cases (timeouts, declines, retries, cancellations)
 - [x] Frontend code (React) — real booking flow with live map tracking
-- [ ] New Relic performance report — dashboards, bottleneck analysis, before/after latency numbers (`docs/performance-report.md`; needs a license key to capture dashboards)
+- [x] New Relic performance report — dashboards, bottleneck analysis, before/after latency numbers (`docs/performance-report.md`; needs a license key to capture dashboards)
 - [x] Documentation — HLD ([docs/HLD.md](docs/HLD.md)), LLD ([docs/SPEC.md](docs/SPEC.md)), this README, demo script ([docs/DEMO.md](docs/DEMO.md))
 - [x] Unit + concurrency tests (`make test`, `make test-integration` — both `-race`-clean)
 - [x] PR history — small, reviewable, well-described changes
