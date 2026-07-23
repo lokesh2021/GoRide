@@ -26,6 +26,52 @@ Reading the shape:
 - **Location pings at 6.8ms p95** include auth (one indexed Postgres SELECT) plus the 2 pipelined Redis round-trips. The domain part is sub-millisecond; auth dominates. At production scale the token lookup becomes a Redis-cached session check — documented in HLD §2.1.
 - **Booking at 7.1ms p95** covers idempotency-key bookkeeping, quote validation, the guarded INSERT with partial-unique-index check, and the synchronous matching kick. Well under the 200ms budget, leaving room for the 1s end-to-end match target even with offer round-trips.
 
+## Capacity probe — how hard one local instance takes it (`loadtest/capacity.js`)
+
+The baseline above is a steady, watchable workload. This probe answers the
+harder question — *how much can a single local instance actually sustain?* — by
+ramping a mixed arrival rate (60% location pings, 25% authenticated reads, 15%
+quotes — the heaviest DB path) from 50 → **800 req/s** in held steps over ~2.7
+minutes, against a 200-driver / 20-rider seeded pool in the `LDT` shard.
+
+**Result: the server never saturated.** 58,226 requests at a mean 364 req/s
+(peak arrival target 800 req/s), latency flat across the entire ramp:
+
+| Path | p50 | p90 | p95 | Notes |
+|---|---|---|---|---|
+| Location ping | 0.53ms | 0.87ms | **0.98ms** | Redis-only hot path |
+| Authenticated read | 0.47ms | 0.77ms | **0.88ms** | |
+| Quote (heaviest) | 1.22ms | 1.93ms | **2.19ms** | estimate + surge + insert |
+| **All requests** | 0.59ms | 1.2ms | **1.68ms** | |
+
+- **Zero server errors (0 × 5xx).** k6 checks: 100% passed.
+- **~5% of responses were `429`** — the per-driver ping limiter (3/s) shedding
+  brief bursts at peak when random distribution briefly pushed a driver over
+  cap. That is correct back-pressure, not failure — and it's *why* the server
+  stayed flat: excess load is rejected cheaply before it touches Postgres.
+- **23 dropped iterations** (0.14/s) — negligible k6-side scheduling at peak.
+
+The honest reading: on one laptop (one Go process, one Postgres, one Redis) the
+relational and cache paths are nowhere near their knee at 800 req/s — p95 held
+under 2.2ms on every path. The ceiling we *can* observe locally isn't the app;
+it's the single-node hardware and the (deliberate) per-driver rate limit.
+
+### Measured locally vs. projected at assignment scale
+
+| Target (assignment §2) | Measured locally | Path to the target |
+|---|---|---|
+| ~10k ride requests/min (~167/s) | 800 req/s mixed sustained at p95 <2.2ms, single instance | Already exceeded on one box; N stateless instances behind an LB scale linearly |
+| ~200k location updates/sec | ping p95 <1ms; path is 2 Redis round-trips, **zero Postgres** | City-sharded Redis (`geo:{city}`) → cluster; ~1.2M Redis ops/s across a small cluster (HLD §2.1) |
+| ~100k drivers | — (pool of 200 here) | Drivers are Redis GEO members + one profile row; no per-driver hot Postgres path |
+| Matching ≤1s p95 | request→offer well under 1s at demo load | GEOSEARCH on the city shard is ~1ms; accept is one short tx |
+
+What is **measured** (defensible with the numbers above): single-instance
+latency and that it doesn't degrade to 800 req/s. What is **projected** (argued
+from architecture, not load-proven at that scale): the 200k/s and 100k-driver
+figures — those need horizontal fan-out and a Redis cluster no laptop can
+stand in for. The design makes the projection credible; the report does not
+claim it as measured.
+
 ## Optimizations already baked in (design-time, assignment §4)
 
 | Technique | Where |
@@ -38,8 +84,19 @@ Reading the shape:
 
 ## New Relic
 
-Instrumentation is fully wired (PR #10): route-pattern transactions, pgx + Redis datastore segments, custom matching/payment metrics. **Dashboard screenshots and alert-policy evidence pend a license key** — once `GORIDE_NEWRELIC_LICENSE` is set, rerunning the k6 scenario populates APM within minutes; this section will be updated with:
-- Per-endpoint p95 dashboard + throughput/error panels
+Instrumentation is wired and **live** (PR #10 + logging PR #18): route-pattern
+APM transactions, pgx + Redis datastore segments, custom matching/payment
+metrics, and — with the logging work — application **logs forwarded in context**
+(linked to the owning trace via `nrslog`). The license key in `.env` is active;
+the load runs above pushed **>7,400 real requests** into the account, so APM has
+data to show.
+
+What to capture for the deliverable (steps in `docs/newrelic-setup.md`):
+- Per-endpoint p95 dashboard + throughput/error panels (APM → Transactions)
 - Slow-query traces (datastore segment breakdown per transaction)
 - `Custom/Matching/OfferLatencyMs` chart vs the 1s match target
-- Alert policy on hot-endpoint p95 breach
+- Logs-in-context view (a transaction with its correlated log lines)
+- An alert policy on hot-endpoint p95 breach
+
+These are UI screenshots only — the data is already flowing. Rotate the license
+key after submission (it was handled locally and is gitignored, never committed).
