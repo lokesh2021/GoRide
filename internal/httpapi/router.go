@@ -13,9 +13,11 @@ import (
 
 	"github.com/lokeshbm/goride/internal/drivers"
 	"github.com/lokeshbm/goride/internal/matching"
+	"github.com/lokeshbm/goride/internal/payments"
 	"github.com/lokeshbm/goride/internal/quotes"
 	"github.com/lokeshbm/goride/internal/rides"
 	"github.com/lokeshbm/goride/internal/store"
+	"github.com/lokeshbm/goride/internal/trips"
 )
 
 // HealthChecker is implemented by the store layer; kept as an interface here
@@ -28,13 +30,15 @@ type HealthChecker interface {
 // Deps holds the dependencies handlers need. Later milestones extend this
 // with matching/trip/payment services.
 type Deps struct {
-	Health  HealthChecker
-	Store   *store.Store
-	Quotes  *quotes.Service
-	Rides   *rides.Service
-	Drivers *drivers.Service
-	Match   *matching.Engine
-	Logger  *slog.Logger
+	Health   HealthChecker
+	Store    *store.Store
+	Quotes   *quotes.Service
+	Rides    *rides.Service
+	Drivers  *drivers.Service
+	Match    *matching.Engine
+	Trips    *trips.Service
+	Payments *payments.Service
+	Logger   *slog.Logger
 }
 
 // NewRouter builds the chi router with base middleware and mounted routes.
@@ -57,6 +61,10 @@ func NewRouter(deps Deps) http.Handler {
 // milestones.
 func Routes(r chi.Router, deps Deps) {
 	r.Get("/healthz", healthzHandler(deps))
+
+	// PSP webhook is unauthenticated (external caller) — authenticated instead by
+	// an HMAC signature over the body. Registered outside the /v1 auth group.
+	r.Post("/v1/webhooks/psp", deps.pspWebhook)
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(deps.authMiddleware)
@@ -84,6 +92,21 @@ func Routes(r chi.Router, deps Deps) {
 		r.Post("/drivers/{id}/availability", requireRole(rides.RoleDriver, deps.setAvailability))
 		r.Post("/drivers/{id}/accept", requireRole(rides.RoleDriver, deps.acceptOffer))
 		r.Post("/drivers/{id}/decline", requireRole(rides.RoleDriver, deps.declineOffer))
+
+		// Trips — assigned driver only. {id} is the RIDE id (trips are 1:1 with
+		// rides). start/pause/resume are state-machine guarded (replay → 409),
+		// like accept/arrived, so they are not idempotency-wrapped; end finalizes
+		// the fare and is idempotency-wrapped so a retry replays the stored result.
+		r.Post("/trips/{id}/start", requireRole(rides.RoleDriver, deps.startTrip))
+		r.Post("/trips/{id}/pause", requireRole(rides.RoleDriver, deps.pauseTrip))
+		r.Post("/trips/{id}/resume", requireRole(rides.RoleDriver, deps.resumeTrip))
+		r.Post("/trips/{id}/end", requireRole(rides.RoleDriver, deps.idempotency(deps.endTrip)))
+
+		// Payments — rider only. Trigger is idempotency-wrapped.
+		r.Post("/payments", requireRole(rides.RoleRider, deps.idempotency(deps.triggerPayment)))
+
+		// Ride history — rider, self only.
+		r.Get("/riders/{id}/rides", requireRole(rides.RoleRider, deps.riderHistory))
 	})
 }
 

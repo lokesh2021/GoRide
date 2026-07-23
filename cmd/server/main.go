@@ -15,9 +15,11 @@ import (
 	"github.com/lokeshbm/goride/internal/drivers"
 	"github.com/lokeshbm/goride/internal/httpapi"
 	"github.com/lokeshbm/goride/internal/matching"
+	"github.com/lokeshbm/goride/internal/payments"
 	"github.com/lokeshbm/goride/internal/quotes"
 	"github.com/lokeshbm/goride/internal/rides"
 	"github.com/lokeshbm/goride/internal/store"
+	"github.com/lokeshbm/goride/internal/trips"
 )
 
 func main() {
@@ -39,6 +41,9 @@ func main() {
 	rideSvc := rides.NewService(st, quoteSvc, logger)
 	driverSvc := drivers.NewService(st, logger)
 	matchEngine := matching.NewEngine(st, rideSvc, driverSvc, logger)
+	tripSvc := trips.NewService(st, rideSvc, driverSvc, quoteSvc, logger)
+	psp := payments.NewPSP(cfg.PSPWebhookURL, cfg.PSPSecret, logger)
+	paymentSvc := payments.NewService(st, rideSvc, psp, cfg.PSPSecret, logger)
 
 	// Wire the M3 seams into the ride service: kick matching immediately on a
 	// new MATCHING ride, and re-add a released driver to the geo pool.
@@ -53,13 +58,15 @@ func main() {
 	matchEngine.Start(ctx)
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		Health:  st,
-		Store:   st,
-		Quotes:  quoteSvc,
-		Rides:   rideSvc,
-		Drivers: driverSvc,
-		Match:   matchEngine,
-		Logger:  logger,
+		Health:   st,
+		Store:    st,
+		Quotes:   quoteSvc,
+		Rides:    rideSvc,
+		Drivers:  driverSvc,
+		Match:    matchEngine,
+		Trips:    tripSvc,
+		Payments: paymentSvc,
+		Logger:   logger,
 	})
 
 	srv := &http.Server{
