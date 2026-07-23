@@ -42,28 +42,6 @@ var (
 	ErrNotFound = errors.New("matching: ride not found")
 )
 
-const (
-	searchRadiusKm = 5.0
-	searchLimit    = 10
-	offerTTL       = 12 * time.Second
-	triedTTL       = 10 * time.Minute
-	matchDeadline  = 60 * time.Second
-	sweepInterval  = 2 * time.Second
-	sweepBatch     = 50
-	// uniqueViolation is the Postgres SQLSTATE for a unique constraint breach
-	// (the partial one-active-ride-per-driver index).
-	uniqueViolation = "23505"
-)
-
-// ---- Redis key helpers ----
-
-func geoKey(city string) string    { return "geo:drivers:" + city }
-func lastKey(id string) string     { return "driver:last:" + id }
-func statusKey(id string) string   { return "driver:status:" + id }
-func offerDriver(id string) string { return "offer:driver:" + id }
-func offerRide(id string) string   { return "offer:ride:" + id }
-func triedKey(id string) string    { return "offered:ride:" + id }
-
 // driverStatus mirrors the JSON at driver:status:{id} written by the drivers
 // package. Duplicated (not imported) to keep the search loop self-contained.
 type driverStatus struct {
@@ -156,7 +134,7 @@ func (e *Engine) offerNext(ctx context.Context, r *rideCtx) (bool, error) {
 		}
 		mirror, fresh, err := e.readCandidate(ctx, driverID)
 		if err != nil {
-			e.log.Warn("matching: read candidate failed", "error", err, "driver_id", driverID)
+			e.log.Warn(logMsgReadCandidateFailed, "error", err, "driver_id", driverID)
 			continue
 		}
 		if !candidateEligible(mirror, fresh, r.Tier) {
@@ -176,16 +154,16 @@ func (e *Engine) offerNext(ctx context.Context, r *rideCtx) (bool, error) {
 			return false, err
 		}
 		expiresAt := time.Now().Add(offerTTL)
-		if err := e.rides.PublishDriver(ctx, driverID, "ride.offer", map[string]any{
+		if err := e.rides.PublishDriver(ctx, driverID, eventRideOffer, map[string]any{
 			"ride_id":    r.ID,
 			"tier":       r.Tier,
 			"pickup_lat": r.PickupLat,
 			"pickup_lng": r.PickupLng,
 			"expires_at": expiresAt.UTC().Format(time.RFC3339),
 		}); err != nil {
-			e.log.Warn("matching: publish offer failed", "error", err, "driver_id", driverID)
+			e.log.Warn(logMsgPublishOfferFailed, "error", err, "driver_id", driverID)
 		}
-		e.log.Info("matching: offered ride", "ride_id", r.ID, "driver_id", driverID)
+		e.log.Info(logMsgOfferedRide, "ride_id", r.ID, "driver_id", driverID)
 		return true, nil
 	}
 	return false, nil
@@ -241,14 +219,14 @@ func (e *Engine) RequestMatch(ctx context.Context, rideID string) {
 
 	r, err := e.loadRideCtx(dctx, rideID)
 	if err != nil {
-		e.log.Warn("matching: request match load failed", "error", err, "ride_id", rideID)
+		e.log.Warn(logMsgRequestMatchLoadFailed, "error", err, "ride_id", rideID)
 		return
 	}
 	if r.Status != string(rides.StatusMatching) {
 		return
 	}
 	if _, err := e.offerNext(dctx, r); err != nil {
-		e.log.Warn("matching: request match offer failed", "error", err, "ride_id", rideID)
+		e.log.Warn(logMsgRequestMatchOfferFailed, "error", err, "ride_id", rideID)
 	}
 }
 
@@ -299,33 +277,33 @@ func (e *Engine) Accept(ctx context.Context, driverID, rideID string) (*rides.Vi
 	if err := e.st.PG.QueryRow(ctx,
 		`SELECT name, vehicle_model, plate, rating, city, tier FROM drivers WHERE id = $1`, driverID,
 	).Scan(&name, &model, &plate, &rating, &city, &tier); err != nil {
-		e.log.Warn("matching: load driver card failed", "error", err, "driver_id", driverID)
+		e.log.Warn(logMsgLoadDriverCardFailed, "error", err, "driver_id", driverID)
 	}
 
 	if err := e.drivers.MarkOnTrip(ctx, driverID, rideID, city, tier); err != nil {
-		e.log.Warn("matching: mark on_trip failed", "error", err, "driver_id", driverID)
+		e.log.Warn(logMsgMarkOnTripFailed, "error", err, "driver_id", driverID)
 	}
 	if err := e.rides.InvalidateCache(ctx, rideID); err != nil {
-		e.log.Warn("matching: cache invalidate failed", "error", err, "ride_id", rideID)
+		e.log.Warn(logMsgCacheInvalidateFailed, "error", err, "ride_id", rideID)
 	}
 	// Delete the outstanding offer:ride marker (offer consumed).
 	if err := e.st.Redis.Del(ctx, offerRide(rideID)).Err(); err != nil {
-		e.log.Warn("matching: del offer:ride failed", "error", err, "ride_id", rideID)
+		e.log.Warn(logMsgDelOfferRideFailed, "error", err, "ride_id", rideID)
 	}
 
 	card := map[string]any{"name": name, "vehicle_model": model, "plate": plate, "rating": rating}
-	if err := e.rides.PublishRide(ctx, rideID, "ride.status_changed", map[string]any{
+	if err := e.rides.PublishRide(ctx, rideID, eventRideStatusChanged, map[string]any{
 		"status": string(rides.StatusDriverAssigned),
 		"driver": card,
 	}); err != nil {
-		e.log.Warn("matching: publish status failed", "error", err, "ride_id", rideID)
+		e.log.Warn(logMsgPublishStatusFailed, "error", err, "ride_id", rideID)
 	}
 	// OTP goes to the rider on the ride channel.
-	if err := e.rides.PublishRide(ctx, rideID, "ride.otp", map[string]any{"otp": otp}); err != nil {
-		e.log.Warn("matching: publish otp failed", "error", err, "ride_id", rideID)
+	if err := e.rides.PublishRide(ctx, rideID, eventRideOTP, map[string]any{"otp": otp}); err != nil {
+		e.log.Warn(logMsgPublishOTPFailed, "error", err, "ride_id", rideID)
 	}
 
-	e.log.Info("matching: ride assigned", "ride_id", rideID, "driver_id", driverID)
+	e.log.Info(logMsgRideAssigned, "ride_id", rideID, "driver_id", driverID)
 	return e.rides.LoadView(ctx, rideID)
 }
 
@@ -395,7 +373,7 @@ func (e *Engine) Decline(ctx context.Context, driverID, rideID string) error {
 	}
 	if r.Status == string(rides.StatusMatching) {
 		if _, err := e.offerNext(ctx, r); err != nil {
-			e.log.Warn("matching: decline advance failed", "error", err, "ride_id", rideID)
+			e.log.Warn(logMsgDeclineAdvanceFailed, "error", err, "ride_id", rideID)
 		}
 	}
 	return nil
@@ -409,11 +387,11 @@ func (e *Engine) Start(ctx context.Context) {
 	go func() {
 		t := time.NewTicker(sweepInterval)
 		defer t.Stop()
-		e.log.Info("matching: sweeper started", "interval", sweepInterval.String())
+		e.log.Info(logMsgSweeperStarted, "interval", sweepInterval.String())
 		for {
 			select {
 			case <-ctx.Done():
-				e.log.Info("matching: sweeper stopped")
+				e.log.Info(logMsgSweeperStopped)
 				return
 			case <-t.C:
 				e.sweep(ctx)
@@ -429,7 +407,7 @@ func (e *Engine) Start(ctx context.Context) {
 func (e *Engine) sweep(ctx context.Context) {
 	rows, err := e.claimMatchingBatch(ctx)
 	if err != nil {
-		e.log.Warn("matching: sweep claim failed", "error", err)
+		e.log.Warn(logMsgSweepClaimFailed, "error", err)
 		return
 	}
 	now := time.Now()
@@ -437,18 +415,18 @@ func (e *Engine) sweep(ctx context.Context) {
 		r := rows[i]
 		if now.Sub(r.CreatedAt) > matchDeadline {
 			if err := e.rides.Expire(ctx, r.ID); err != nil && !errors.Is(err, rides.ErrInvalidState) {
-				e.log.Warn("matching: expire failed", "error", err, "ride_id", r.ID)
+				e.log.Warn(logMsgExpireFailed, "error", err, "ride_id", r.ID)
 			}
 			continue
 		}
 		n, err := e.st.Redis.Exists(ctx, offerRide(r.ID)).Result()
 		if err != nil {
-			e.log.Warn("matching: sweep exists failed", "error", err, "ride_id", r.ID)
+			e.log.Warn(logMsgSweepExistsFailed, "error", err, "ride_id", r.ID)
 			continue
 		}
 		if n == 0 {
 			if _, err := e.offerNext(ctx, &r); err != nil {
-				e.log.Warn("matching: sweep offer failed", "error", err, "ride_id", r.ID)
+				e.log.Warn(logMsgSweepOfferFailed, "error", err, "ride_id", r.ID)
 			}
 		}
 	}

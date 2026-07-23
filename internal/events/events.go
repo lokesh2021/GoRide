@@ -19,11 +19,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const (
-	rideChannelPrefix   = "events:ride:"
-	driverChannelPrefix = "events:driver:"
-)
-
 // RideChannel returns the pub/sub channel a ride's events are published to.
 func RideChannel(rideID string) string { return rideChannelPrefix + rideID }
 
@@ -90,11 +85,11 @@ func (p *Publisher) PublishDriverEvent(ctx context.Context, driverID, eventType 
 func (p *Publisher) publish(ctx context.Context, channel string, env Envelope) {
 	raw, err := json.Marshal(env)
 	if err != nil {
-		p.log.Warn("events: marshal envelope failed", "error", err, "channel", channel, "type", env.Type)
+		p.log.Warn(logMsgMarshalEnvelopeFailed, "error", err, "channel", channel, "type", env.Type)
 		return
 	}
 	if err := p.rdb.Publish(ctx, channel, raw).Err(); err != nil {
-		p.log.Warn("events: publish failed", "error", err, "channel", channel, "type", env.Type)
+		p.log.Warn(logMsgPublishFailed, "error", err, "channel", channel, "type", env.Type)
 	}
 }
 

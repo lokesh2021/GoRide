@@ -21,22 +21,6 @@ type webhookPayload struct {
 	Status string `json:"status"` // "success" | "failure"
 }
 
-// Webhook status literals (the PSP callback vocabulary, distinct from the
-// PENDING/PROCESSING/... payment statuses).
-const (
-	pspSuccess = "success"
-	pspFailure = "failure"
-)
-
-const (
-	// jitterMinMs..jitterMaxMs is the async confirmation delay window (SPEC:
-	// 300–800ms).
-	jitterMinMs = 300
-	jitterMaxMs = 800
-	// successPercent is the mock approval rate (SPEC: 90%).
-	successPercent = 90
-)
-
 // PSP is the in-process mock payment service provider. Trigger hands it a
 // psp_ref + amount; after a short jitter it POSTs a signed confirmation webhook
 // back to our own endpoint, simulating a real provider's async callback.
@@ -71,7 +55,7 @@ func (p *PSP) Schedule(pspRef string, amount int) {
 		time.Sleep(delay)
 		status := pspOutcome(amount, roll)
 		if err := p.postWebhook(pspRef, status); err != nil {
-			p.log.Warn("psp: post webhook failed", "error", err, "psp_ref", pspRef)
+			p.log.Warn(logMsgPostWebhookFailed, "error", err, "psp_ref", pspRef)
 		}
 	}()
 }

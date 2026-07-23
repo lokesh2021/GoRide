@@ -67,8 +67,8 @@ func (deps Deps) createQuote(w http.ResponseWriter, r *http.Request) {
 
 	q, err := deps.Quotes.Create(r.Context(), actor.ID, pickup, drop, req.City)
 	if err != nil {
-		deps.Logger.Error("createQuote failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not create quote")
+		deps.Logger.Error(logMsgCreateQuoteFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not create quote")
 		return
 	}
 
@@ -161,7 +161,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		WriteErr(w, http.StatusBadRequest, "VALIDATION_FAILED", "invalid JSON body: "+err.Error())
+		WriteErr(w, http.StatusBadRequest, CodeValidationFailed, "invalid JSON body: "+err.Error())
 		return false
 	}
 	return true
@@ -213,30 +213,30 @@ func validPaymentMethod(m string) bool {
 }
 
 func writeValidation(w http.ResponseWriter, field, msg string) {
-	WriteErr(w, http.StatusBadRequest, "VALIDATION_FAILED", field+" "+msg)
+	WriteErr(w, http.StatusBadRequest, CodeValidationFailed, field+" "+msg)
 }
 
 // writeRideErr maps ride domain errors to HTTP status/codes.
 func writeRideErr(w http.ResponseWriter, deps Deps, op string, err error) {
 	switch {
 	case errors.Is(err, rides.ErrQuoteNotFound):
-		WriteErr(w, http.StatusNotFound, "QUOTE_NOT_FOUND", "quote not found")
+		WriteErr(w, http.StatusNotFound, CodeQuoteNotFound, "quote not found")
 	case errors.Is(err, rides.ErrQuoteExpired):
-		WriteErr(w, http.StatusUnprocessableEntity, "QUOTE_EXPIRED", "quote has expired")
+		WriteErr(w, http.StatusUnprocessableEntity, CodeQuoteExpired, "quote has expired")
 	case errors.Is(err, rides.ErrQuoteNotOwned):
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "quote belongs to another rider")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "quote belongs to another rider")
 	case errors.Is(err, rides.ErrTierUnavailable):
 		writeValidation(w, "tier", "not available in the quote")
 	case errors.Is(err, rides.ErrAlreadyActive):
-		WriteErr(w, http.StatusConflict, "RIDE_ALREADY_ACTIVE", "rider already has an active ride")
+		WriteErr(w, http.StatusConflict, CodeRideAlreadyActive, "rider already has an active ride")
 	case errors.Is(err, rides.ErrNotFound):
-		WriteErr(w, http.StatusNotFound, "NOT_FOUND", "ride not found")
+		WriteErr(w, http.StatusNotFound, CodeNotFound, "ride not found")
 	case errors.Is(err, rides.ErrForbidden):
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "not permitted to access this ride")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "not permitted to access this ride")
 	case errors.Is(err, rides.ErrInvalidState):
-		WriteErr(w, http.StatusConflict, "INVALID_STATE", "ride is not in a valid state for this action")
+		WriteErr(w, http.StatusConflict, CodeInvalidState, "ride is not in a valid state for this action")
 	default:
 		deps.Logger.Error(op+" failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "internal error")
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "internal error")
 	}
 }

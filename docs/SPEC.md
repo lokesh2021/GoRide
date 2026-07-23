@@ -102,6 +102,13 @@ Supply for surge = `ZCARD`-equivalent count of available drivers in the cell are
 `{"type": "ride.status_changed|ride.offer|ride.driver_location|payment.updated", "ride_id": "...", "data": {...}, "ts": "..."}`
 Hub subscribes to Redis pub/sub; handlers publish via `events.Publish(ctx, channel, event)`. During an active ride, driver location pings are republished (throttled to 1/s) onto the ride channel for rider tracking.
 
+## Constants & logging conventions
+
+- Every `internal/` package keeps a `constants.go` grouping, in labeled blocks: domain constants (statuses, limits, TTLs), Redis key prefixes/builders, and that package's log message constants (`logMsg*` unexported, e.g. `logMsgSweeperStopped = "matching: sweeper stopped"`). No magic strings/numbers inline in logic files.
+- Log calls use the message constants: `s.log.Warn(logMsgCacheInvalidateFailed, "error", err, ...)`. Structured attrs stay inline at the call site.
+- API error codes live ONLY in `internal/httpapi/codes.go` (exported consts, one authoritative list — they are stable API surface). Handlers never write code strings inline.
+- Constants stay in the package that owns them — no shared "constants" package. Cross-package needs indicate the constant belongs to the owning domain's exported surface.
+
 ## Testing conventions
 
 - Unit tests colocated `_test.go`; table-driven. Fakes for store interfaces — no DB required for unit tests.

@@ -18,13 +18,13 @@ type Config struct {
 // Load reads configuration from the environment, applying documented defaults.
 func Load() Config {
 	return Config{
-		Addr:            getenv("GORIDE_ADDR", ":8080"),
+		Addr:            getenv("GORIDE_ADDR", defaultAddr),
 		PGDSN:           os.Getenv("GORIDE_PG_DSN"),
-		RedisAddr:       getenv("GORIDE_REDIS_ADDR", "localhost:6379"),
-		Env:             getenv("GORIDE_ENV", "dev"),
+		RedisAddr:       getenv("GORIDE_REDIS_ADDR", defaultRedisAddr),
+		Env:             getenv("GORIDE_ENV", defaultEnv),
 		NewRelicLicense: os.Getenv("GORIDE_NEWRELIC_LICENSE"),
-		PSPSecret:       getenv("GORIDE_PSP_SECRET", "dev-psp-secret"),
-		PSPWebhookURL:   getenv("GORIDE_PSP_WEBHOOK_URL", "http://localhost:8080/v1/webhooks/psp"),
+		PSPSecret:       getenv("GORIDE_PSP_SECRET", defaultPSPSecret),
+		PSPWebhookURL:   getenv("GORIDE_PSP_WEBHOOK_URL", defaultPSPWebhookURL),
 	}
 }
 

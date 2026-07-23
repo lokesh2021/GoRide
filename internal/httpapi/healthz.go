@@ -8,11 +8,11 @@ func healthzHandler(deps Deps) http.HandlerFunc {
 		ctx := r.Context()
 
 		if err := deps.Health.PingPostgres(ctx); err != nil {
-			WriteErr(w, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "postgres unavailable: "+err.Error())
+			WriteErr(w, http.StatusServiceUnavailable, CodeDependencyUnavailable, "postgres unavailable: "+err.Error())
 			return
 		}
 		if err := deps.Health.PingRedis(ctx); err != nil {
-			WriteErr(w, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "redis unavailable: "+err.Error())
+			WriteErr(w, http.StatusServiceUnavailable, CodeDependencyUnavailable, "redis unavailable: "+err.Error())
 			return
 		}
 

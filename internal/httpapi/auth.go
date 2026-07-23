@@ -32,18 +32,18 @@ func (deps Deps) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r)
 		if !ok {
-			WriteErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or malformed Authorization header")
+			WriteErr(w, http.StatusUnauthorized, CodeUnauthorized, "missing or malformed Authorization header")
 			return
 		}
 
 		actor, err := resolveToken(r.Context(), deps, token)
 		if errors.Is(err, errNoActor) {
-			WriteErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid token")
+			WriteErr(w, http.StatusUnauthorized, CodeUnauthorized, "invalid token")
 			return
 		}
 		if err != nil {
-			deps.Logger.Error("auth: resolve token failed", "error", err)
-			WriteErr(w, http.StatusInternalServerError, "INTERNAL", "authentication failed")
+			deps.Logger.Error(logMsgAuthResolveTokenFailed, "error", err)
+			WriteErr(w, http.StatusInternalServerError, CodeInternal, "authentication failed")
 			return
 		}
 
@@ -57,11 +57,11 @@ func requireRole(role string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		actor, ok := ActorFrom(r.Context())
 		if !ok {
-			WriteErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			WriteErr(w, http.StatusUnauthorized, CodeUnauthorized, "not authenticated")
 			return
 		}
 		if actor.Role != role {
-			WriteErr(w, http.StatusForbidden, "FORBIDDEN", "requires "+role+" role")
+			WriteErr(w, http.StatusForbidden, CodeForbidden, "requires "+role+" role")
 			return
 		}
 		next(w, r)
@@ -73,7 +73,7 @@ func requireAnyRole(roles []string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		actor, ok := ActorFrom(r.Context())
 		if !ok {
-			WriteErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			WriteErr(w, http.StatusUnauthorized, CodeUnauthorized, "not authenticated")
 			return
 		}
 		for _, role := range roles {
@@ -82,7 +82,7 @@ func requireAnyRole(roles []string, next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		}
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "role not permitted")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "role not permitted")
 	}
 }
 

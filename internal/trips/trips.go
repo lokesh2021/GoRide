@@ -43,23 +43,6 @@ var (
 	ErrInvalidOTP   = errors.New("trips: invalid otp")
 )
 
-// Trip statuses (Postgres CHECK constraint on trips.status).
-const (
-	StatusStarted = "STARTED"
-	StatusPaused  = "PAUSED"
-	StatusEnded   = "ENDED"
-)
-
-// uniqueViolation is the Postgres SQLSTATE for a unique constraint breach
-// (trips.ride_id is unique — one trip per ride).
-const uniqueViolation = "23505"
-
-// pausedAtTTL bounds the lifetime of the trip:paused_at mirror so an abandoned
-// paused trip cannot leave a stale key forever (resume/end delete it).
-const pausedAtTTL = 2 * time.Hour
-
-func pausedAtKey(rideID string) string { return "trip:paused_at:" + rideID }
-
 // Trip is the read model returned by the service.
 type Trip struct {
 	RideID        string             `json:"ride_id"`
@@ -187,7 +170,7 @@ func (s *Service) Pause(ctx context.Context, driverID, rideID string) (*Trip, er
 	}
 	// Mirror the pause-start instant (no paused_at column); folded in on resume.
 	if err := s.st.Redis.Set(ctx, pausedAtKey(rideID), time.Now().UTC().Unix(), pausedAtTTL).Err(); err != nil {
-		s.log.Warn("trips: set paused_at failed", "error", err, "ride_id", rideID)
+		s.log.Warn(logMsgSetPausedAtFailed, "error", err, "ride_id", rideID)
 	}
 	return s.load(ctx, rideID)
 }
@@ -348,7 +331,7 @@ func (s *Service) End(ctx context.Context, driverID, rideID string) (*Trip, erro
 
 	// Post-commit: re-add driver to geo pool, invalidate cache, publish w/ fare.
 	if err := s.drivers.Release(ctx, driverID); err != nil {
-		s.log.Warn("trips: driver release failed", "error", err, "driver_id", driverID)
+		s.log.Warn(logMsgDriverReleaseFailed, "error", err, "driver_id", driverID)
 	}
 	s.afterRideStatus(ctx, rideID, rides.StatusCompleted, map[string]any{"fare": breakdown})
 
@@ -371,14 +354,14 @@ func (s *Service) End(ctx context.Context, driverID, rideID string) (*Trip, erro
 // the event data (e.g. the fare breakdown on end).
 func (s *Service) afterRideStatus(ctx context.Context, rideID string, to rides.Status, extra map[string]any) {
 	if err := s.rides.InvalidateCache(ctx, rideID); err != nil {
-		s.log.Warn("trips: cache invalidate failed", "error", err, "ride_id", rideID)
+		s.log.Warn(logMsgCacheInvalidateFailed, "error", err, "ride_id", rideID)
 	}
 	data := map[string]any{"status": string(to)}
 	for k, v := range extra {
 		data[k] = v
 	}
-	if err := s.rides.PublishRide(ctx, rideID, "ride.status_changed", data); err != nil {
-		s.log.Warn("trips: publish status failed", "error", err, "ride_id", rideID)
+	if err := s.rides.PublishRide(ctx, rideID, eventRideStatusChanged, data); err != nil {
+		s.log.Warn(logMsgPublishStatusFailed, "error", err, "ride_id", rideID)
 	}
 }
 
@@ -407,7 +390,7 @@ func (s *Service) consumePause(ctx context.Context, rideID string) int {
 		return 0
 	}
 	if err != nil {
-		s.log.Warn("trips: read paused_at failed", "error", err, "ride_id", rideID)
+		s.log.Warn(logMsgReadPausedAtFailed, "error", err, "ride_id", rideID)
 		return 0
 	}
 	pausedAt, err := strconv.ParseInt(raw, 10, 64)

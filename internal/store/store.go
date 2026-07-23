@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"runtime"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -28,15 +27,15 @@ func New(ctx context.Context, cfg config.Config) (*Store, error) {
 		return nil, fmt.Errorf("store: parse pg dsn: %w", err)
 	}
 
-	maxConns := int32(runtime.NumCPU() * 4)
-	if maxConns < 4 {
-		maxConns = 4
+	maxConns := int32(runtime.NumCPU() * pgConnsPerCPU)
+	if maxConns < minPGPoolConns {
+		maxConns = minPGPoolConns
 	}
 	pgCfg.MaxConns = maxConns
 	pgCfg.MinConns = 1
-	pgCfg.MaxConnLifetime = time.Hour
-	pgCfg.MaxConnIdleTime = 30 * time.Minute
-	pgCfg.HealthCheckPeriod = time.Minute
+	pgCfg.MaxConnLifetime = pgMaxConnLifetime
+	pgCfg.MaxConnIdleTime = pgMaxConnIdleTime
+	pgCfg.HealthCheckPeriod = pgHealthCheckPeriod
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {
@@ -47,7 +46,7 @@ func New(ctx context.Context, cfg config.Config) (*Store, error) {
 
 	s := &Store{PG: pool, Redis: rdb}
 
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
 	if err := s.PingPostgres(pingCtx); err != nil {
 		pool.Close()

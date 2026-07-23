@@ -40,7 +40,7 @@ func driverSelf(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	if actor.ID != id {
-		WriteErr(w, http.StatusForbidden, "FORBIDDEN", "driver may only act on its own resource")
+		WriteErr(w, http.StatusForbidden, CodeForbidden, "driver may only act on its own resource")
 		return "", false
 	}
 	return id, true
@@ -74,12 +74,12 @@ func (deps Deps) updateLocation(w http.ResponseWriter, r *http.Request) {
 
 	err := deps.Drivers.UpdateLocation(r.Context(), id, *req.Lat, *req.Lng)
 	if errors.Is(err, drivers.ErrRateLimited) {
-		WriteErr(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many location updates")
+		WriteErr(w, http.StatusTooManyRequests, CodeRateLimited, "too many location updates")
 		return
 	}
 	if err != nil {
-		deps.Logger.Error("updateLocation failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not record location")
+		deps.Logger.Error(logMsgUpdateLocationFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not record location")
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -102,16 +102,16 @@ func (deps Deps) setAvailability(w http.ResponseWriter, r *http.Request) {
 
 	err := deps.Drivers.SetAvailability(r.Context(), id, *req.Available)
 	if errors.Is(err, drivers.ErrInvalidState) {
-		WriteErr(w, http.StatusConflict, "INVALID_STATE", "driver is on a trip and cannot change availability")
+		WriteErr(w, http.StatusConflict, CodeInvalidState, "driver is on a trip and cannot change availability")
 		return
 	}
 	if errors.Is(err, drivers.ErrNotFound) {
-		WriteErr(w, http.StatusNotFound, "NOT_FOUND", "driver not found")
+		WriteErr(w, http.StatusNotFound, CodeNotFound, "driver not found")
 		return
 	}
 	if err != nil {
-		deps.Logger.Error("setAvailability failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not update availability")
+		deps.Logger.Error(logMsgSetAvailabilityFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not update availability")
 		return
 	}
 	status := drivers.StatusOffline
@@ -141,14 +141,14 @@ func (deps Deps) acceptOffer(w http.ResponseWriter, r *http.Request) {
 	ride, err := deps.Match.Accept(r.Context(), id, req.RideID)
 	switch {
 	case errors.Is(err, matching.ErrOfferExpired):
-		WriteErr(w, http.StatusConflict, "OFFER_EXPIRED", "offer expired or not held by this driver")
+		WriteErr(w, http.StatusConflict, CodeOfferExpired, "offer expired or not held by this driver")
 	case errors.Is(err, matching.ErrRideGone):
-		WriteErr(w, http.StatusConflict, "INVALID_STATE", "ride is no longer available for assignment")
+		WriteErr(w, http.StatusConflict, CodeInvalidState, "ride is no longer available for assignment")
 	case errors.Is(err, matching.ErrNotFound):
-		WriteErr(w, http.StatusNotFound, "NOT_FOUND", "ride not found")
+		WriteErr(w, http.StatusNotFound, CodeNotFound, "ride not found")
 	case err != nil:
-		deps.Logger.Error("acceptOffer failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not accept offer")
+		deps.Logger.Error(logMsgAcceptOfferFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not accept offer")
 	default:
 		WriteJSON(w, http.StatusOK, ride)
 	}
@@ -171,12 +171,12 @@ func (deps Deps) declineOffer(w http.ResponseWriter, r *http.Request) {
 
 	err := deps.Match.Decline(r.Context(), id, req.RideID)
 	if errors.Is(err, matching.ErrNotFound) {
-		WriteErr(w, http.StatusNotFound, "NOT_FOUND", "ride not found")
+		WriteErr(w, http.StatusNotFound, CodeNotFound, "ride not found")
 		return
 	}
 	if err != nil {
-		deps.Logger.Error("declineOffer failed", "error", err)
-		WriteErr(w, http.StatusInternalServerError, "INTERNAL", "could not decline offer")
+		deps.Logger.Error(logMsgDeclineOfferFailed, "error", err)
+		WriteErr(w, http.StatusInternalServerError, CodeInternal, "could not decline offer")
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"ok": true})

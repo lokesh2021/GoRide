@@ -32,17 +32,6 @@ var (
 	ErrRetriesExhausted = errors.New("payments: retries exhausted")
 )
 
-// Payment statuses (Postgres CHECK constraint on payments.status).
-const (
-	StatusPending    = "PENDING"
-	StatusProcessing = "PROCESSING"
-	StatusSucceeded  = "SUCCEEDED"
-	StatusFailed     = "FAILED"
-)
-
-// maxRetries caps FAILED → PROCESSING re-triggers (SPEC: max 3).
-const maxRetries = 3
-
 // Payment is the read model returned by Trigger.
 type Payment struct {
 	ID         string `json:"id"`
@@ -266,11 +255,11 @@ func (s *Service) applyFailure(ctx context.Context, pspRef, rideID string) error
 // publishPaymentUpdated emits payment.updated on the ride channel (no-op
 // publisher until M5).
 func (s *Service) publishPaymentUpdated(ctx context.Context, rideID, status string, retryCount int) {
-	if err := s.rides.PublishRide(ctx, rideID, "payment.updated", map[string]any{
+	if err := s.rides.PublishRide(ctx, rideID, eventPaymentUpdated, map[string]any{
 		"status":      status,
 		"retry_count": retryCount,
 	}); err != nil {
-		s.log.Warn("payments: publish payment.updated failed", "error", err, "ride_id", rideID)
+		s.log.Warn(logMsgPublishPaymentUpdatedFailed, "error", err, "ride_id", rideID)
 	}
 }
 
@@ -299,9 +288,6 @@ type HistoryItem struct {
 	Driver    *DriverView  `json:"driver,omitempty"`
 	Receipt   *ReceiptView `json:"receipt,omitempty"`
 }
-
-// historyLimit caps ride history to the most recent N (SPEC/task: 20).
-const historyLimit = 20
 
 // History returns a rider's most-recent-first ride history (up to historyLimit),
 // each with status, tier, fare_total, the assigned driver (when any), and the

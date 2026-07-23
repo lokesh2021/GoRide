@@ -134,7 +134,7 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(ww, req)
 
-			logger.Info("http_request",
+			logger.Info(logMsgHTTPRequest,
 				"request_id", middleware.GetReqID(req.Context()),
 				"method", req.Method,
 				"path", req.URL.Path,
