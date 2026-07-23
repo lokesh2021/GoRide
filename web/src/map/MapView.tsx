@@ -34,9 +34,9 @@ function divIcon(html: string, className: string, size = 30): L.DivIcon {
   });
 }
 
-const pickupIcon = divIcon("📍", "pin-icon");
+const pickupIcon = divIcon('<div class="pickup-dot"></div>', "", 16);
 const dropIcon = divIcon("🏁", "pin-icon");
-const botIcon = divIcon('<div class="bot-dot"></div>', "", 12);
+const botIcon = divIcon('<div class="bot-dot"></div>', "", 8);
 
 function ClickCatcher({ picking, onPick }: { picking?: "pickup" | "drop" | null; onPick?: (p: LatLng) => void }) {
   useMapEvents({
@@ -103,17 +103,23 @@ export function MapView(props: MapViewProps) {
   return (
     <MapContainer center={center} zoom={13} zoomControl={false} attributionControl={false} className="leaflet-container">
       <TileLayer
-        // CartoDB dark tiles — OpenStreetMap data, free, no API key. Dark theme
-        // to match the app. OSM attribution kept per tile usage policy.
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        attribution='&copy; OpenStreetMap &copy; CARTO'
+        // CartoDB Positron (light) tiles — OpenStreetMap data, free, no API key.
+        // OSM + CARTO attribution kept per tile usage policy.
+        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+        attribution="&copy; OpenStreetMap contributors &copy; CARTO"
         subdomains="abcd"
         maxZoom={19}
+        // Plain OSM fallback (no key): uncomment to swap tile provider.
+        // url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        // attribution="&copy; OpenStreetMap contributors"
       />
       <ClickCatcher picking={picking} onPick={onPick} />
 
       {route && route.length > 1 && (
-        <Polyline positions={route} pathOptions={{ color: "#7c5cff", weight: 4, opacity: 0.85 }} />
+        <Polyline
+          positions={route}
+          pathOptions={{ color: "#6d5ce6", weight: 4, opacity: 0.85, dashArray: "8 8", lineCap: "round" }}
+        />
       )}
 
       {pickup && <Marker position={pickup} icon={pickupIcon} />}

@@ -179,6 +179,14 @@ export interface OfferData {
   tier: Tier;
   pickup_lat: number;
   pickup_lng: number;
+  drop_lat: number;
+  drop_lng: number;
+  /** Quoted fare for the booked tier, integer paise. */
+  fare: number;
+  distance_m: number;
+  duration_s: number;
+  rider_name: string;
+  rider_rating: number;
   expires_at: string;
 }
 
