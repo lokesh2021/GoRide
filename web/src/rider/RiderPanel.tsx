@@ -210,27 +210,8 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
   }, [pickup, drop, driverPos]);
 
   return (
-    <div className="phone">
-      <div className="phone-topbar">
-        <div>
-          <div className="role">Rider</div>
-          <div className="who">{persona.name}</div>
-        </div>
-        <select
-          className="select"
-          value={persona.id}
-          onChange={(e) => onPersonaChange(e.target.value)}
-          disabled={!!ride && status !== "COMPLETED"}
-        >
-          {RIDERS.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="phone-map">
+    <div className="panel">
+      <div className="panel-map">
         <MapView
           center={pickup ?? [12.9716, 77.5946]}
           pickup={pickup}
@@ -249,7 +230,30 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
         />
       </div>
 
-      <div className="sheet">
+      <div className="persona-chip rider">
+        <div className="avatar">{persona.name.charAt(0)}</div>
+        <div>
+          <span className="role">Rider</span>
+          <span className="name">{persona.name}</span>
+        </div>
+      </div>
+
+      <label className="persona-select">
+        <select
+          aria-label="Select rider persona"
+          value={persona.id}
+          onChange={(e) => onPersonaChange(e.target.value)}
+          disabled={!!ride && status !== "COMPLETED"}
+        >
+          {RIDERS.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="float-card bottom-left">
         {showHistory ? (
           <HistoryView items={history} onBack={() => setShowHistory(false)} />
         ) : !ride ? (
@@ -329,21 +333,21 @@ function PlanView(props: {
       </div>
 
       <div className="leg">
-        <div className="leg-row" style={{ outline: picking === "pickup" ? "2px solid var(--brand)" : "none" }}>
+        <div className="leg-row" style={{ outline: picking === "pickup" ? "2px solid var(--accent)" : "none" }}>
           <span className="marker pickup" />
           <div className="txt">
-            <div className="t">{placeName(pickup)}</div>
             <div className="c">Pickup</div>
+            <div className="t">{placeName(pickup)}</div>
           </div>
           <button className="btn ghost" onClick={() => setPicking(picking === "pickup" ? null : "pickup")}>
             {picking === "pickup" ? "Tap map…" : "Set"}
           </button>
         </div>
-        <div className="leg-row" style={{ outline: picking === "drop" ? "2px solid var(--brand)" : "none" }}>
+        <div className="leg-row" style={{ outline: picking === "drop" ? "2px solid var(--accent)" : "none" }}>
           <span className="marker drop" />
           <div className="txt">
-            <div className="t">{placeName(drop)}</div>
             <div className="c">Destination</div>
+            <div className="t">{placeName(drop)}</div>
           </div>
           <button className="btn ghost" onClick={() => setPicking(picking === "drop" ? null : "drop")}>
             {picking === "drop" ? "Tap map…" : "Set"}

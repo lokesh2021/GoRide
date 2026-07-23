@@ -65,11 +65,14 @@ export default function App() {
       <div className="app">
         <header className="app-header">
           <div className="wordmark">
-            <span className="dot" />
+            <span className="status-dot" />
             <span>
-              <span className="go">Go</span>Ride
+              <span className="go">Go</span>
+              <span className="ride">Ride</span>
             </span>
           </div>
+
+          <span className="console-badge">Simulation Console</span>
 
           <div className="header-spacer" />
 
@@ -86,24 +89,33 @@ export default function App() {
               </span>
             )}
 
-            <label className="row" style={{ gap: 8, fontSize: 13, fontWeight: 600 }}>
-              Bots
-              <select
-                className="select"
-                value={botCount}
-                onChange={(e) => setBotCount(Number(e.target.value))}
-                style={{ padding: "6px 8px" }}
-              >
-                {[1, 2, 3, 4, 5].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="row" style={{ gap: 8 }}>
+              <span className="ctrl-label">Bots</span>
+              <div className="stepper" role="group" aria-label="Bot driver count">
+                <button
+                  type="button"
+                  aria-label="Fewer bots"
+                  onClick={() => setBotCount((n) => Math.max(0, n - 1))}
+                  disabled={botCount <= 0}
+                >
+                  −
+                </button>
+                <span className="count" aria-live="polite">
+                  {botCount}
+                </span>
+                <button
+                  type="button"
+                  aria-label="More bots"
+                  onClick={() => setBotCount((n) => Math.min(10, n + 1))}
+                  disabled={botCount >= 10}
+                >
+                  +
+                </button>
+              </div>
+            </div>
 
-            <div className="row" style={{ gap: 8, fontSize: 13, fontWeight: 600 }}>
-              Demo mode
+            <div className="row" style={{ gap: 8 }}>
+              <span className="ctrl-label">Demo mode</span>
               <button
                 type="button"
                 role="switch"

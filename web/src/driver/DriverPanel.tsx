@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Api } from "../api/client";
 import type { OfferData, RideStatus, RideView, SSEEnvelope, StatusChangedData } from "../api/types";
 import type { DriverPersona } from "../config/personas";
-import { DRIVERS } from "../config/personas";
+import { DRIVERS, PLACES } from "../config/personas";
 import { buildRoute, haversine, lerp, type LatLng } from "../lib/geo";
 import { rupees } from "../lib/money";
 import { MapView, type BotMarker } from "../map/MapView";
@@ -11,6 +11,12 @@ import { useToast } from "../ui/toast";
 
 const DRIVE_SPEED_M = 200; // metres per ~1s tick
 const NEAR_PICKUP_M = 90;
+
+// Reverse-lookup a coordinate to a known Bengaluru place name (else short coords).
+function placeName(lat: number, lng: number): string {
+  const near = PLACES.find((pl) => Math.abs(pl.lat - lat) < 0.004 && Math.abs(pl.lng - lng) < 0.004);
+  return near ? near.name : `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+}
 
 interface Props {
   persona: DriverPersona;
@@ -271,23 +277,11 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
     return pts;
   }, [pos, ride]);
 
-  return (
-    <div className="phone">
-      <div className="phone-topbar">
-        <div>
-          <div className="role">Driver</div>
-          <div className="who">{persona.name}</div>
-        </div>
-        <select className="select" value={persona.id} onChange={(e) => onPersonaChange(e.target.value)} disabled={online}>
-          {DRIVERS.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name} · {d.tier}
-            </option>
-          ))}
-        </select>
-      </div>
+  const offerKm = offer ? (haversine(pos, [offer.pickup_lat, offer.pickup_lng]) / 1000).toFixed(1) : "0";
 
-      <div className="phone-map">
+  return (
+    <div className="panel">
+      <div className="panel-map">
         <MapView
           center={pos}
           pickup={ride ? [ride.pickup_lat, ride.pickup_lng] : null}
@@ -297,39 +291,59 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
           bots={bots}
           fitPoints={fitPoints}
         />
-
-        {offer && (
-          <div className="offer-overlay">
-            <div className="offer-card">
-              <div className="role">New ride offer</div>
-              <h2>{offer.tier.toUpperCase()} trip</h2>
-              <div className="countdown">
-                <div className="bar" style={{ width: `${Math.max(0, countdown * 100)}%` }} />
-              </div>
-              <div className="offer-stats">
-                <div className="offer-stat">
-                  <div className="v">{(haversine(pos, [offer.pickup_lat, offer.pickup_lng]) / 1000).toFixed(1)} km</div>
-                  <div className="l">to pickup</div>
-                </div>
-                <div className="offer-stat">
-                  <div className="v">{offer.tier}</div>
-                  <div className="l">vehicle tier</div>
-                </div>
-              </div>
-              <div className="row" style={{ gap: 10 }}>
-                <button className="btn dark" onClick={decline}>
-                  Decline
-                </button>
-                <button className="btn go" onClick={accept} disabled={busy}>
-                  Accept
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
-      <div className="sheet">
+      <div className="persona-chip driver">
+        <div className="avatar">{persona.name.charAt(0)}</div>
+        <div>
+          <span className="role">Driver</span>
+          <span className="name">{persona.name}</span>
+        </div>
+      </div>
+
+      <label className="persona-select">
+        <select
+          aria-label="Select driver persona"
+          value={persona.id}
+          onChange={(e) => onPersonaChange(e.target.value)}
+          disabled={online}
+        >
+          {DRIVERS.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name} · {d.tier}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {offer && (
+        <div className="offer-modal" role="dialog" aria-label="New ride request">
+          <div className="offer-progress">
+            <span style={{ width: `${Math.max(0, countdown * 100)}%` }} />
+          </div>
+          <div className="offer-top">
+            <span className="offer-tag">● New ride request</span>
+            <span className="offer-headline">{rupees(offer.fare)}</span>
+          </div>
+          <div className="offer-route">
+            {placeName(offer.pickup_lat, offer.pickup_lng)} → {placeName(offer.drop_lat, offer.drop_lng)}
+          </div>
+          <div className="offer-meta">
+            {(offer.distance_m / 1000).toFixed(1)} km · {Math.round(offer.duration_s / 60)} min ·{" "}
+            {offer.rider_name} ★ {offer.rider_rating.toFixed(1)} · {offerKm} km to pickup
+          </div>
+          <div className="offer-actions">
+            <button className="btn go" onClick={accept} disabled={busy}>
+              Accept
+            </button>
+            <button className="btn dark" onClick={decline}>
+              Decline
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="float-card bottom-right">
         {!ride ? (
           <OnlineView
             online={online}
@@ -398,11 +412,11 @@ function OnlineView({
         </button>
       </div>
 
-      <div className="dcard">
-        <div className="avatar">{persona.name.charAt(0)}</div>
+      <div className="vehicle-row">
+        <div className="veh-tile">🚗</div>
         <div className="info">
           <div className="n">
-            {persona.vehicleModel} · <span style={{ textTransform: "capitalize" }}>{persona.tier}</span>
+            {persona.vehicleModel} <span className="tier-tag">· {persona.tier}</span>
           </div>
           <span className="plate">{persona.plate}</span>
         </div>
@@ -418,10 +432,10 @@ function OnlineView({
         Tip: position near the rider's pickup before going online so you're the nearest match.
       </p>
 
-      <div className="row" style={{ justifyContent: "space-between" }}>
+      <div className="opt-row">
         <div>
-          <div style={{ fontWeight: 600 }}>Auto-pilot</div>
-          <div className="muted">Auto-drive to pickup and mark arriving/arrived</div>
+          <div className="opt-title">Auto-pilot</div>
+          <div className="opt-desc">Auto-drive to pickup and mark arriving/arrived</div>
         </div>
         <button
           type="button"
