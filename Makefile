@@ -29,3 +29,11 @@ vet:
 
 tidy:
 	go mod tidy
+
+# Combined statement coverage across internal/* production code (unit +
+# integration tests). testsupport is excluded — it is the test fixture, not
+# production code. Needs live Postgres + Redis.
+COVERPKG = $(shell go list ./internal/... | grep -v /internal/testsupport | paste -sd, -)
+cover:
+	go test -tags integration ./... -coverpkg=$(COVERPKG) -covermode=atomic -coverprofile=coverage.out -count=1
+	@go tool cover -func=coverage.out | tail -1
