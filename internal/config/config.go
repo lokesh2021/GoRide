@@ -12,6 +12,7 @@ type Config struct {
 	Env             string // GORIDE_ENV
 	NewRelicLicense string // GORIDE_NEWRELIC_LICENSE (optional; agent disabled when empty)
 	PSPSecret       string // GORIDE_PSP_SECRET
+	PSPWebhookURL   string // GORIDE_PSP_WEBHOOK_URL (mock PSP posts confirmations here)
 }
 
 // Load reads configuration from the environment, applying documented defaults.
@@ -23,6 +24,7 @@ func Load() Config {
 		Env:             getenv("GORIDE_ENV", "dev"),
 		NewRelicLicense: os.Getenv("GORIDE_NEWRELIC_LICENSE"),
 		PSPSecret:       getenv("GORIDE_PSP_SECRET", "dev-psp-secret"),
+		PSPWebhookURL:   getenv("GORIDE_PSP_WEBHOOK_URL", "http://localhost:8080/v1/webhooks/psp"),
 	}
 }
 
