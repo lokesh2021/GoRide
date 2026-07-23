@@ -57,6 +57,13 @@ export const PLACES: Place[] = [
   { name: "Electronic City", lat: 12.8452, lng: 77.6602 },
 ];
 
+// Reverse-lookup a coordinate to a known Bengaluru place name (else short
+// coords). Shared by the rider/driver panels and the receipt view.
+export function placeName(lat: number, lng: number): string {
+  const near = PLACES.find((pl) => Math.abs(pl.lat - lat) < 0.004 && Math.abs(pl.lng - lng) < 0.004);
+  return near ? near.name : `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+}
+
 // Loose city bounds the simulator keeps bots inside of.
 export const CITY_BOUNDS = {
   minLat: 12.86,

@@ -333,7 +333,17 @@ func (s *Service) End(ctx context.Context, driverID, rideID string) (*Trip, erro
 	if err := s.drivers.Release(ctx, driverID); err != nil {
 		s.log.Warn(logMsgDriverReleaseFailed, "error", err, "driver_id", driverID)
 	}
-	s.afterRideStatus(ctx, rideID, rides.StatusCompleted, map[string]any{"fare": breakdown})
+	// Publish the fare breakdown enriched with trip metrics so the rider can
+	// render a detailed receipt at completion (before any payment). Built from
+	// the already-marshalled breakdown JSON so the pricing components stay in
+	// exact lockstep with what was written to the trip row.
+	fareData := map[string]any{}
+	_ = json.Unmarshal(fareJSON, &fareData)
+	fareData[fareKeyDistanceM] = distanceM
+	fareData[fareKeyDurationS] = actualDuration
+	fareData[fareKeyStartedAt] = startedAt.UTC().Format(time.RFC3339)
+	fareData[fareKeyEndedAt] = endedAt.UTC().Format(time.RFC3339)
+	s.afterRideStatus(ctx, rideID, rides.StatusCompleted, map[string]any{"fare": fareData})
 
 	return &Trip{
 		RideID:        rideID,

@@ -15,10 +15,14 @@ export interface SSEHandle {
   close: () => void;
 }
 
+export type StreamStatus = "open" | "reconnecting";
+
 interface StreamOpts {
   onEvent: (env: SSEEnvelope) => void;
   onError?: (err: unknown) => void;
   onOpen?: () => void;
+  /** Connection status transitions, for a "Reconnecting…" indicator. */
+  onStatus?: (s: StreamStatus) => void;
 }
 
 // openStream connects to an SSE path with the given bearer token and invokes
@@ -41,6 +45,7 @@ export function openStream(path: string, token: string, opts: StreamOpts): SSEHa
         throw new Error(`SSE ${path} failed: ${res.status}`);
       }
       opts.onOpen?.();
+      opts.onStatus?.("open");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -64,6 +69,7 @@ export function openStream(path: string, token: string, opts: StreamOpts): SSEHa
     } catch (err) {
       if (closed) return;
       opts.onError?.(err);
+      opts.onStatus?.("reconnecting");
       // Reconnect after a short delay.
       retryTimer = setTimeout(connect, 1500);
     }

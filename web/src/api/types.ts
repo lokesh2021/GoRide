@@ -89,12 +89,19 @@ export interface RideRequest {
 // ---- trips ----
 
 // pricing.Breakdown (fare line items; components are pre-surge paise).
+// M13: the trip-end event and the immutable receipt breakdown also carry the
+// trip metrics below. They are optional here because older receipts (written
+// before M13) lack them — render gracefully when absent.
 export interface FareBreakdown {
   base: number;
   distance_component: number;
   time_component: number;
   surge_x100: number;
   total: number;
+  distance_m?: number;
+  duration_s?: number;
+  started_at?: string;
+  ended_at?: string;
 }
 
 export type TripStatus = "STARTED" | "PAUSED" | "ENDED";
@@ -139,6 +146,10 @@ export interface HistoryItem {
   status: RideStatus;
   tier: Tier;
   fare_total: number | null;
+  pickup_lat: number;
+  pickup_lng: number;
+  drop_lat: number;
+  drop_lng: number;
   created_at: string;
   driver?: { name: string; plate: string };
   receipt?: ReceiptView;
