@@ -1112,6 +1112,488 @@ body {
   box-shadow: 0 0 4px rgba(109, 92, 230, 0.6);
 }
 
+/* ---------- spinners (inline busy) ---------- */
+
+.spin-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.spinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  opacity: 0.85;
+  animation: spin 0.7s linear infinite;
+}
+.spinner.big {
+  width: 34px;
+  height: 34px;
+  border-width: 3px;
+  color: var(--accent);
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.toggle.busy {
+  opacity: 0.55;
+}
+
+/* ---------- reconnecting pill ---------- */
+
+.sse-pill {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1100;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.sse-pill .spinner {
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+}
+
+/* ---------- skeleton / boot shimmer ---------- */
+
+.shimmer-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.sk {
+  background: linear-gradient(90deg, var(--soft) 25%, #eeeeec 37%, var(--soft) 63%);
+  background-size: 400% 100%;
+  border-radius: 8px;
+  animation: shimmer 1.3s ease infinite;
+}
+@keyframes shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0 0;
+  }
+}
+.sk-title {
+  height: 26px;
+  width: 55%;
+}
+.sk-line {
+  height: 12px;
+  width: 100%;
+}
+.sk-row {
+  height: 56px;
+  width: 100%;
+  border-radius: 14px;
+}
+.sk-btn {
+  height: 48px;
+  width: 100%;
+  border-radius: 14px;
+}
+.sk-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ---------- in-app dialog ---------- */
+
+.dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 1500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(20, 20, 40, 0.28);
+  backdrop-filter: blur(2px);
+}
+.dialog {
+  width: min(360px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 20px 50px rgba(20, 20, 40, 0.25);
+  padding: 20px;
+  animation: dialogin 0.18s ease;
+}
+@keyframes dialogin {
+  from {
+    transform: translateY(10px) scale(0.98);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.dialog h3 {
+  margin: 0 0 6px;
+  font-size: 19px;
+  font-weight: 800;
+}
+.dialog-msg {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 14px;
+}
+.dialog-input {
+  width: 100%;
+  margin-bottom: 14px;
+}
+.dialog-actions {
+  display: flex;
+  gap: 10px;
+}
+.dialog-actions .btn {
+  flex: 1;
+}
+.btn.danger-solid {
+  background: var(--red);
+  color: #fff;
+}
+.btn.danger-solid:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+/* metered km/duration inside the End-trip dialog */
+.metered {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.metered > div {
+  flex: 1;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.metered .m-val {
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.metered .m-lbl {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* ---------- offer alert pulse ---------- */
+
+.offer-modal.pulse {
+  animation: slidedown 0.25s ease, offerPulse 1.6s ease-in-out 0.25s infinite;
+}
+@keyframes offerPulse {
+  0%,
+  100% {
+    box-shadow: 0 16px 40px rgba(20, 20, 40, 0.2), 0 0 0 0 rgba(109, 92, 230, 0.5);
+  }
+  50% {
+    box-shadow: 0 16px 40px rgba(20, 20, 40, 0.2), 0 0 0 6px rgba(109, 92, 230, 0);
+  }
+}
+
+/* ---------- driver ETA chip ---------- */
+
+.eta-chip {
+  display: inline-block;
+  background: rgba(109, 92, 230, 0.1);
+  color: var(--accent);
+  border: 1px solid rgba(109, 92, 230, 0.2);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+/* ---------- rider trip-completed banner ---------- */
+
+.success-banner {
+  background: var(--green-bg);
+  color: var(--green);
+  border: 1px solid rgba(22, 163, 74, 0.2);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-weight: 700;
+  font-size: 14px;
+  text-align: center;
+  margin-bottom: 12px;
+  animation: slideup 0.25s ease;
+}
+
+/* ---------- payment sheet ---------- */
+
+.pay-sheet {
+  width: min(340px, 100%);
+  text-align: center;
+}
+.pay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 18px;
+}
+.pay-method {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.pay-amount {
+  font-size: 22px;
+  font-weight: 800;
+}
+.pay-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0 6px;
+}
+.pay-msg {
+  font-size: 15px;
+  font-weight: 700;
+}
+.pay-state .muted {
+  margin-top: -8px;
+}
+.pay-state .btn {
+  width: 100%;
+}
+.check-anim {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--green);
+  color: #fff;
+  font-size: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: pop 0.3s ease;
+}
+.pay-x {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #fdecec;
+  color: var(--red);
+  font-size: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+@keyframes pop {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* ---------- itemised receipt ---------- */
+
+.receipt {
+  background: var(--panel);
+}
+.rcpt-head {
+  text-align: center;
+  border-bottom: 1px dashed var(--line);
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+}
+.rcpt-brand {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.rcpt-brand .go {
+  color: var(--ink);
+}
+.rcpt-brand .ride {
+  color: var(--accent);
+}
+.rcpt-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.rcpt-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.rcpt-route {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.rcpt-leg {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 0;
+}
+.rcpt-leg .marker {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+}
+.rcpt-leg .marker.pickup {
+  border-radius: 50%;
+  background: var(--green);
+}
+.rcpt-leg .marker.drop {
+  border-radius: 2px;
+  background: var(--red);
+}
+.rcpt-span {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+  padding-left: 19px;
+}
+.rcpt-items {
+  margin-bottom: 10px;
+}
+.rcpt-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 5px 0;
+}
+.rcpt-line span:last-child {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.rcpt-hairline {
+  height: 1px;
+  background: var(--line);
+  margin: 6px 0;
+}
+.rcpt-line.total {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--ink);
+  padding-top: 8px;
+}
+.rcpt-line.total span:last-child {
+  color: var(--green);
+  font-weight: 800;
+}
+.rcpt-pay {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.rcpt-method {
+  font-family: "SF Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+/* history: expandable receipt rows */
+.hist-wrap {
+  border-bottom: 1px solid var(--line);
+}
+.hist-wrap.open {
+  background: var(--soft);
+  border-radius: 12px;
+  border-bottom-color: transparent;
+  padding: 0 10px;
+}
+.hist-wrap .hist-item {
+  border-bottom: none;
+}
+.hist-item.as-btn {
+  width: 100%;
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  align-items: center;
+}
+.hist-item.as-btn:disabled {
+  cursor: default;
+}
+.h-expand {
+  color: var(--accent);
+  font-weight: 700;
+}
+.hist-receipt {
+  padding: 4px 4px 14px;
+}
+
+/* ---------- print: isolate the receipt ---------- */
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+  .printable,
+  .printable * {
+    visibility: visible !important;
+  }
+  .printable {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 24px;
+    background: #fff;
+    box-shadow: none;
+  }
+  .printable .no-print {
+    display: none !important;
+  }
+}
+
 /* ---------- responsive: stack panels ---------- */
 
 @media (max-width: 1000px) {

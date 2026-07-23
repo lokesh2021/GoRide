@@ -12,7 +12,8 @@ import { Api } from "../api/client";
 import type { DriverPersona } from "../config/personas";
 import { CITY_BOUNDS } from "../config/personas";
 import type { OfferData, SSEEnvelope, StatusChangedData } from "../api/types";
-import { haversine, lerp, type LatLng } from "../lib/geo";
+import { haversine, lerp, pointAtDistance, type LatLng } from "../lib/geo";
+import { fetchRoadThrottled } from "../lib/routing";
 import { openStream, type SSEHandle } from "../sse/stream";
 
 type BotMode = "roam" | "to_pickup" | "waiting";
@@ -22,6 +23,12 @@ interface Bot {
   api: Api;
   pos: LatLng;
   target: LatLng;
+  // Current road-following polyline (OSRM, throttled + cached) and how far along
+  // it we've driven. Null until a route resolves (or if OSRM is unreachable) —
+  // in which case the bot falls back to straight-line movement toward target.
+  path: LatLng[] | null;
+  driven: number;
+  routeSeq: number;
   mode: BotMode;
   rideId: string | null;
   pickup: LatLng | null;
@@ -72,7 +79,10 @@ export class Simulator {
         persona: p,
         api: new Api(p.token),
         pos: start,
-        target: randInBounds(),
+        target: start,
+        path: null,
+        driven: 0,
+        routeSeq: 0,
         mode: "roam",
         rideId: null,
         pickup: null,
@@ -81,6 +91,7 @@ export class Simulator {
         arrivedSent: false,
         arrivingSent: false,
       };
+      this.route(bot, randInBounds());
       // Go online, then listen for offers.
       bot.api.setAvailability(p.id, true).catch(() => {});
       bot.offerSse = openStream(`/v1/events/driver/${p.id}`, p.token, {
@@ -120,7 +131,7 @@ export class Simulator {
         bot.mode = "to_pickup";
         bot.rideId = rideId;
         bot.pickup = [data.pickup_lat, data.pickup_lng];
-        bot.target = bot.pickup;
+        this.route(bot, bot.pickup);
         bot.arrivingSent = false;
         bot.arrivedSent = false;
         // Watch the ride so we can go back to roaming when it ends/cancels.
@@ -147,7 +158,7 @@ export class Simulator {
     bot.mode = "roam";
     bot.rideId = null;
     bot.pickup = null;
-    bot.target = randInBounds();
+    this.route(bot, randInBounds());
     // Re-assert availability (trip end frees us, but this is harmless/idempotent).
     bot.api.setAvailability(bot.persona.id, true).catch(() => {});
   }
@@ -175,12 +186,41 @@ export class Simulator {
     this.notify();
   }
 
+  // route points the bot at `to` and asks OSRM (throttled + shared cache) for a
+  // road-following polyline. Until it resolves — or forever, if OSRM is
+  // unreachable — the bot moves straight-line toward the target (see drive).
+  private route(bot: Bot, to: LatLng) {
+    bot.target = to;
+    bot.path = null;
+    bot.driven = 0;
+    const seq = ++bot.routeSeq;
+    const from = bot.pos;
+    fetchRoadThrottled(from, to).then((r) => {
+      // Apply only if this is still the bot's current routing intent.
+      if (r && bot.routeSeq === seq) {
+        bot.path = r.path;
+        bot.driven = 0;
+      }
+    });
+  }
+
   private drive(bot: Bot) {
     if (bot.mode === "waiting") return; // parked
+
+    // Prefer the road polyline; advance along cumulative segment distances.
+    if (bot.path && bot.path.length > 1) {
+      bot.driven += SPEED_M;
+      const { pos, done } = pointAtDistance(bot.path, bot.driven);
+      bot.pos = pos;
+      if (done && bot.mode === "roam") this.route(bot, randInBounds());
+      return;
+    }
+
+    // Fallback: straight-line toward target (OSRM pending or unavailable).
     const d = haversine(bot.pos, bot.target);
     if (d < SPEED_M) {
       bot.pos = bot.target;
-      if (bot.mode === "roam") bot.target = randInBounds();
+      if (bot.mode === "roam") this.route(bot, randInBounds());
       return;
     }
     bot.pos = lerp(bot.pos, bot.target, SPEED_M / d);

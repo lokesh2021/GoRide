@@ -32,6 +32,23 @@ const (
 	successPercent = 90
 )
 
+// ---- receipt breakdown keys (M13) ----
+
+// Keys stamped onto the immutable receipt breakdown jsonb at creation. The
+// pricing components (base/distance_component/...) are copied verbatim from the
+// trip's fare; these add the payment identity plus the trip metrics needed for
+// a detailed, itemised receipt. All additive — older receipts may lack the
+// M13 metric keys, which the frontend handles gracefully.
+const (
+	receiptKeyMethod    = "method"
+	receiptKeyRideID    = "ride_id"
+	receiptKeyPaymentID = "payment_id"
+	receiptKeyDistanceM = "distance_m"
+	receiptKeyDurationS = "duration_s"
+	receiptKeyStartedAt = "started_at"
+	receiptKeyEndedAt   = "ended_at"
+)
+
 // ---- event types ----
 
 const eventPaymentUpdated = "payment.updated"

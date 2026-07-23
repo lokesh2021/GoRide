@@ -2,21 +2,29 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Api } from "../api/client";
 import type { OfferData, RideStatus, RideView, SSEEnvelope, StatusChangedData } from "../api/types";
 import type { DriverPersona } from "../config/personas";
-import { DRIVERS, PLACES } from "../config/personas";
-import { buildRoute, haversine, lerp, type LatLng } from "../lib/geo";
+import { DRIVERS, placeName } from "../config/personas";
+import { playChirp, startTitleFlash, stopTitleFlash } from "../lib/alerts";
+import { buildRoute, haversine, pointAtDistance, routeLength, type LatLng } from "../lib/geo";
 import { rupees } from "../lib/money";
+import { fetchRoad } from "../lib/routing";
 import { MapView, type BotMarker } from "../map/MapView";
 import { openStream } from "../sse/stream";
+import { ConfirmDialog } from "../ui/dialog";
+import { Spinner } from "../ui/spinner";
 import { useToast } from "../ui/toast";
 
-const DRIVE_SPEED_M = 200; // metres per ~1s tick
+// Metres advanced along the route per ~1s tick. Demo-brisk on purpose (this is
+// a watchable simulation console, not a real-time clock) — the car traces the
+// real OSRM road geometry, just faster than wall-clock driving. The *displayed*
+// ETA is computed from a realistic city speed (below), so it reads in true
+// minutes even though the car arrives sooner.
+const DRIVE_SPEED_M = 180;
+// ~30 km/h city speed, used only to turn remaining route distance into a
+// human ETA ("~4 min away"). OSRM's own duration/distance is preferred when
+// available; this is the offline fallback.
+const CITY_SPEED_MPS = 30000 / 3600;
 const NEAR_PICKUP_M = 90;
-
-// Reverse-lookup a coordinate to a known Bengaluru place name (else short coords).
-function placeName(lat: number, lng: number): string {
-  const near = PLACES.find((pl) => Math.abs(pl.lat - lat) < 0.004 && Math.abs(pl.lng - lng) < 0.004);
-  return near ? near.name : `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-}
+const OFFER_TITLE = "🚗 New ride request — GoRide";
 
 interface Props {
   persona: DriverPersona;
@@ -26,6 +34,14 @@ interface Props {
 }
 
 type Phase = "idle" | "to_pickup" | "at_pickup" | "to_drop";
+
+// The active leg the drive loop is tracing.
+interface Leg {
+  phase: Phase;
+  pts: LatLng[];
+  driven: number; // metres advanced from the leg start
+  speedMps: number; // realistic speed for ETA (OSRM-derived when available)
+}
 
 function phaseFor(status: RideStatus | null): Phase {
   switch (status) {
@@ -53,7 +69,12 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
   const [countdown, setCountdown] = useState(1);
   const [otpInput, setOtpInput] = useState("");
   const [autopilot, setAutopilot] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null); // which action is in flight
+  const [booting, setBooting] = useState(true); // panel-level rehydration shimmer
+  const [eta, setEta] = useState<number | null>(null); // seconds to pickup
+  const [legPath, setLegPath] = useState<LatLng[] | null>(null); // drawn route
+  const [reconnecting, setReconnecting] = useState(false);
+  const [confirm, setConfirm] = useState<null | "decline" | "end">(null);
 
   // Refs the 1s driving loop reads (avoids stale closures).
   const posRef = useRef(pos);
@@ -61,6 +82,9 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
   const statusRef = useRef<RideStatus | null>(null);
   const autopilotRef = useRef(autopilot);
   const sentRef = useRef<{ arriving: boolean; arrived: boolean }>({ arriving: false, arrived: false });
+  const legRef = useRef<Leg | null>(null);
+  const tripStartRef = useRef<number | null>(null);
+  const sseDownRef = useRef<{ offer: boolean; ride: boolean }>({ offer: false, ride: false });
 
   useEffect(() => { posRef.current = pos; }, [pos]);
   useEffect(() => { rideRef.current = ride; }, [ride]);
@@ -69,18 +93,24 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
 
   const phase = phaseFor(status);
 
+  const setSseStatus = useCallback((which: "offer" | "ride", s: "open" | "reconnecting") => {
+    sseDownRef.current[which] = s === "reconnecting";
+    setReconnecting(sseDownRef.current.offer || sseDownRef.current.ride);
+  }, []);
+
   // Reset on persona switch, then rehydrate an in-flight assignment: a page
   // refresh must not orphan a driver mid-ride (the backend still has them
   // on_trip; the client re-attaches and the drive loop resumes).
   useEffect(() => {
+    setBooting(true);
     setOnline(false);
     setRide(null);
     setStatus(null);
     setOffer(null);
     setOtpInput("");
+    stopTitleFlash();
+    tripStartRef.current = null;
 
-    // Server-authoritative: the backend knows whether this driver is online
-    // and mid-assignment (works across devices and after storage loss).
     let stale = false;
     (async () => {
       try {
@@ -90,6 +120,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
           setRide(st.active_ride);
           setStatus(st.active_ride.status);
           setOnline(true); // on_trip server-side
+          if (st.active_ride.status === "IN_PROGRESS") tripStartRef.current = Date.now();
           sentRef.current = {
             arriving: st.active_ride.status !== "DRIVER_ASSIGNED",
             arrived: st.active_ride.status === "ARRIVED" || st.active_ride.status === "IN_PROGRESS",
@@ -99,6 +130,8 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
         }
       } catch {
         // Best-effort on load; the toggle still works without it.
+      } finally {
+        if (!stale) setBooting(false);
       }
     })();
     return () => {
@@ -107,7 +140,11 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persona.id]);
 
+  // Stop any title flash when the panel unmounts.
+  useEffect(() => () => stopTitleFlash(), []);
+
   const goOnline = async (v: boolean) => {
+    setBusy("toggle");
     try {
       await api.setAvailability(persona.id, v);
       setOnline(v);
@@ -119,6 +156,8 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
       }
     } catch (e) {
       toast.error(e, "Could not change availability");
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -129,14 +168,24 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
       onEvent: (env: SSEEnvelope) => {
         if (env.type === "ride.offer") {
           const d = env.data as OfferData;
-          // Ignore offers while already on a ride.
-          if (rideRef.current) return;
-          setOffer(d);
+          if (rideRef.current) return; // already on a ride
+          setOffer((prev) => {
+            // Only alert on a genuinely new offer (not a re-delivery of the same).
+            if (!prev || prev.ride_id !== d.ride_id) {
+              playChirp();
+              startTitleFlash(OFFER_TITLE);
+            }
+            return d;
+          });
         }
       },
+      onStatus: (s) => setSseStatus("offer", s),
     });
-    return () => handle.close();
-  }, [online, persona.id, persona.token]);
+    return () => {
+      handle.close();
+      setSseStatus("offer", "open");
+    };
+  }, [online, persona.id, persona.token, setSseStatus]);
 
   // ---- offer countdown ----
   useEffect(() => {
@@ -149,6 +198,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
       if (left <= 0) {
         setOffer(null);
         setCountdown(1);
+        stopTitleFlash(); // offer expired
       } else {
         setCountdown(left / total);
       }
@@ -164,78 +214,129 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
         if (env.type === "ride.status_changed") {
           const st = (env.data as StatusChangedData).status;
           setStatus(st);
+          if (st === "IN_PROGRESS" && tripStartRef.current == null) tripStartRef.current = Date.now();
           if (st === "CANCELLED_BY_RIDER" || st === "EXPIRED") {
             toast.info("Ride was cancelled by rider");
             resetRide();
           }
         }
       },
+      onStatus: (s) => setSseStatus("ride", s),
     });
-    return () => handle.close();
+    return () => {
+      handle.close();
+      setSseStatus("ride", "open");
+    };
   }, [ride?.id, persona.token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- compute the driving leg (OSRM road route) whenever the leg changes ----
+  useEffect(() => {
+    if (!ride || (phase !== "to_pickup" && phase !== "to_drop")) {
+      legRef.current = null;
+      setLegPath(null);
+      setEta(null);
+      return;
+    }
+    const from: LatLng = phase === "to_pickup" ? posRef.current : [ride.pickup_lat, ride.pickup_lng];
+    const to: LatLng = phase === "to_pickup" ? [ride.pickup_lat, ride.pickup_lng] : [ride.drop_lat, ride.drop_lng];
+
+    // Immediate local fallback so the car never stalls waiting on the network.
+    const fallback = buildRoute(from, to);
+    legRef.current = { phase, pts: fallback, driven: 0, speedMps: CITY_SPEED_MPS };
+    setLegPath(fallback);
+
+    let cancelled = false;
+    fetchRoad(from, to).then((road) => {
+      if (cancelled || !road) return; // OSRM unreachable → keep the fallback
+      const cur = legRef.current;
+      if (!cur || cur.phase !== phase) return; // moved on to another leg
+      const speed = road.distanceM > 0 && road.durationS > 0 ? road.distanceM / road.durationS : CITY_SPEED_MPS;
+      legRef.current = { phase, pts: road.path, driven: cur.driven, speedMps: speed };
+      setLegPath(road.path);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ride?.id, phase]);
 
   const accept = async () => {
     if (!offer) return;
-    setBusy(true);
+    setBusy("accept");
     try {
       const r = await api.accept(persona.id, offer.ride_id);
       setRide(r);
       setStatus(r.status);
       setOffer(null);
+      stopTitleFlash();
       sentRef.current = { arriving: false, arrived: false };
       toast.success("Ride accepted");
     } catch (e) {
       toast.error(e, "Could not accept");
       setOffer(null);
+      stopTitleFlash();
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   const decline = async () => {
+    setConfirm(null);
     if (!offer) return;
+    setBusy("decline");
     try {
       await api.decline(persona.id, offer.ride_id);
     } catch {
       /* offer may have expired */
+    } finally {
+      setBusy(null);
     }
     setOffer(null);
+    stopTitleFlash();
   };
 
   const doArriving = async () => {
     if (!ride) return;
+    setBusy("arriving");
     try {
       await api.arriving(ride.id);
     } catch (e) {
       toast.error(e);
+    } finally {
+      setBusy(null);
     }
   };
   const doArrived = async () => {
     if (!ride) return;
+    setBusy("arrived");
     try {
       await api.arrived(ride.id);
     } catch (e) {
       toast.error(e);
+    } finally {
+      setBusy(null);
     }
   };
 
   const startTrip = async () => {
     if (!ride) return;
-    setBusy(true);
+    setBusy("start");
     try {
       await api.startTrip(ride.id, otpInput.trim());
       setOtpInput("");
+      tripStartRef.current = Date.now();
       toast.success("Trip started");
     } catch (e) {
       toast.error(e, "Invalid OTP");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   const endTrip = async () => {
+    setConfirm(null);
     if (!ride) return;
-    setBusy(true);
+    setBusy("end");
     try {
       const t = await api.endTrip(ride.id);
       toast.success(`Trip complete · earned ${rupees(t.fare?.total ?? 0)}`);
@@ -243,7 +344,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
     } catch (e) {
       toast.error(e, "Could not end trip");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -251,39 +352,41 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
     setRide(null);
     setStatus(null);
     setOtpInput("");
+    tripStartRef.current = null;
+    legRef.current = null;
+    setLegPath(null);
+    setEta(null);
     sentRef.current = { arriving: false, arrived: false };
-  }, [persona.id]);
+  }, []);
 
-  // ---- 1s driving + ping loop ----
+  // ---- 1s driving + ping loop (follows the OSRM/fallback polyline) ----
   useEffect(() => {
     if (!online) return;
     const iv = setInterval(() => {
       const r = rideRef.current;
       const st = statusRef.current;
       const ph = phaseFor(st);
-      let cur = posRef.current;
+      const leg = legRef.current;
 
-      // Determine target.
-      let target: LatLng | null = null;
-      if (r && ph === "to_pickup") target = [r.pickup_lat, r.pickup_lng];
-      else if (r && ph === "to_drop") target = [r.drop_lat, r.drop_lng];
+      if (r && (ph === "to_pickup" || ph === "to_drop") && leg && leg.phase === ph && leg.pts.length > 1) {
+        leg.driven += DRIVE_SPEED_M;
+        const { pos: next } = pointAtDistance(leg.pts, leg.driven);
+        posRef.current = next;
+        setPos(next);
 
-      if (target) {
-        const d = haversine(cur, target);
-        cur = d < DRIVE_SPEED_M ? target : lerp(cur, target, DRIVE_SPEED_M / d);
-        posRef.current = cur;
-        setPos(cur);
-
-        // Auto-progress arriving/arrived near pickup.
-        if (autopilotRef.current && ph === "to_pickup" && r) {
-          const dp = haversine(cur, [r.pickup_lat, r.pickup_lng]);
-          if (dp < NEAR_PICKUP_M * 1.6 && st === "DRIVER_ASSIGNED" && !sentRef.current.arriving) {
-            sentRef.current.arriving = true;
-            api.arriving(r.id).catch(() => {});
-          }
-          if (dp < NEAR_PICKUP_M && (st === "DRIVER_ARRIVING" || st === "DRIVER_ASSIGNED") && !sentRef.current.arrived) {
-            sentRef.current.arrived = true;
-            setTimeout(() => api.arrived(r.id).catch(() => {}), 1000);
+        if (ph === "to_pickup") {
+          const remaining = Math.max(0, routeLength(leg.pts) - leg.driven);
+          setEta(Math.round(remaining / (leg.speedMps || CITY_SPEED_MPS)));
+          if (autopilotRef.current) {
+            const dp = haversine(next, [r.pickup_lat, r.pickup_lng]);
+            if (dp < NEAR_PICKUP_M * 1.6 && st === "DRIVER_ASSIGNED" && !sentRef.current.arriving) {
+              sentRef.current.arriving = true;
+              api.arriving(r.id).catch(() => {});
+            }
+            if (dp < NEAR_PICKUP_M && (st === "DRIVER_ARRIVING" || st === "DRIVER_ASSIGNED") && !sentRef.current.arrived) {
+              sentRef.current.arrived = true;
+              setTimeout(() => api.arrived(r.id).catch(() => {}), 1000);
+            }
           }
         }
       }
@@ -294,11 +397,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
   }, [online, api, persona.id]);
 
   // ---- map props ----
-  const route = useMemo<LatLng[] | null>(() => {
-    if (!ride) return null;
-    if (phase === "to_pickup") return buildRoute(pos, [ride.pickup_lat, ride.pickup_lng]);
-    return buildRoute([ride.pickup_lat, ride.pickup_lng], [ride.drop_lat, ride.drop_lng]);
-  }, [ride, phase, pos]);
+  const route = ride ? legPath : null;
 
   const fitPoints = useMemo<LatLng[]>(() => {
     const pts: LatLng[] = [pos];
@@ -307,6 +406,10 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
   }, [pos, ride]);
 
   const offerKm = offer ? (haversine(pos, [offer.pickup_lat, offer.pickup_lng]) / 1000).toFixed(1) : "0";
+
+  // Live metered km / duration surfaced in the End-trip confirm.
+  const meteredKm = phase === "to_drop" && legRef.current ? (legRef.current.driven / 1000).toFixed(1) : "0.0";
+  const meteredMin = tripStartRef.current ? Math.max(1, Math.round((Date.now() - tripStartRef.current) / 60000)) : 0;
 
   return (
     <div className="panel">
@@ -330,6 +433,13 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
         </div>
       </div>
 
+      {reconnecting && (
+        <div className="sse-pill" role="status">
+          <span className="spinner" aria-hidden="true" />
+          Reconnecting…
+        </div>
+      )}
+
       <label className="persona-select">
         <select
           aria-label="Select driver persona"
@@ -346,7 +456,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
       </label>
 
       {offer && (
-        <div className="offer-modal" role="dialog" aria-label="New ride request">
+        <div className="offer-modal pulse" role="dialog" aria-modal="true" aria-label="New ride request">
           <div className="offer-progress">
             <span style={{ width: `${Math.max(0, countdown * 100)}%` }} />
           </div>
@@ -362,20 +472,23 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
             {offer.rider_name} ★ {offer.rider_rating.toFixed(1)} · {offerKm} km to pickup
           </div>
           <div className="offer-actions">
-            <button className="btn go" onClick={accept} disabled={busy}>
-              Accept
+            <button className="btn go" onClick={accept} disabled={busy !== null}>
+              {busy === "accept" ? <Spinner label="Accepting…" /> : "Accept"}
             </button>
-            <button className="btn dark" onClick={decline}>
-              Decline
+            <button className="btn dark" onClick={() => setConfirm("decline")} disabled={busy !== null}>
+              {busy === "decline" ? <Spinner /> : "Decline"}
             </button>
           </div>
         </div>
       )}
 
       <div className="float-card bottom-right">
-        {!ride ? (
+        {booting ? (
+          <PanelShimmer />
+        ) : !ride ? (
           <OnlineView
             online={online}
+            busy={busy}
             onToggle={goOnline}
             persona={persona}
             canJump={!!lastRiderPickup && !online}
@@ -392,19 +505,69 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
             setOtpInput={setOtpInput}
             busy={busy}
             autopilot={autopilot}
+            eta={eta}
             onArriving={doArriving}
             onArrived={doArrived}
             onStart={startTrip}
-            onEnd={endTrip}
+            onEnd={() => setConfirm("end")}
           />
         )}
       </div>
+
+      {confirm === "decline" && (
+        <ConfirmDialog
+          title="Decline this request?"
+          message="The ride will be offered to another nearby driver."
+          confirmLabel="Decline"
+          cancelLabel="Keep"
+          tone="danger"
+          busy={busy === "decline"}
+          onConfirm={decline}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {confirm === "end" && (
+        <ConfirmDialog
+          title="End trip?"
+          message="This finalises the fare and completes the ride."
+          confirmLabel="End trip"
+          cancelLabel="Keep driving"
+          tone="danger"
+          busy={busy === "end"}
+          onConfirm={endTrip}
+          onCancel={() => setConfirm(null)}
+        >
+          <div className="metered">
+            <div>
+              <div className="m-val">{meteredKm} km</div>
+              <div className="m-lbl">Metered distance</div>
+            </div>
+            <div>
+              <div className="m-val">{meteredMin || "—"} min</div>
+              <div className="m-lbl">Trip duration</div>
+            </div>
+          </div>
+        </ConfirmDialog>
+      )}
+    </div>
+  );
+}
+
+function PanelShimmer() {
+  return (
+    <div className="shimmer-block" aria-busy="true" aria-label="Loading">
+      <div className="sk sk-title" />
+      <div className="sk sk-line" />
+      <div className="sk sk-row" />
+      <div className="sk sk-btn" />
     </div>
   );
 }
 
 function OnlineView({
   online,
+  busy,
   onToggle,
   persona,
   canJump,
@@ -413,6 +576,7 @@ function OnlineView({
   setAutopilot,
 }: {
   online: boolean;
+  busy: string | null;
   onToggle: (v: boolean) => void;
   persona: DriverPersona;
   canJump: boolean;
@@ -434,7 +598,9 @@ function OnlineView({
           role="switch"
           aria-checked={online}
           aria-label={online ? "Go offline" : "Go online"}
-          className={`toggle ${online ? "on" : ""}`}
+          aria-busy={busy === "toggle"}
+          className={`toggle ${online ? "on" : ""} ${busy === "toggle" ? "busy" : ""}`}
+          disabled={busy === "toggle"}
           onClick={() => onToggle(!online)}
         >
           <div className="knob" />
@@ -489,6 +655,7 @@ function ActiveDriveView({
   setOtpInput,
   busy,
   autopilot,
+  eta,
   onArriving,
   onArrived,
   onStart,
@@ -499,13 +666,15 @@ function ActiveDriveView({
   phase: Phase;
   otpInput: string;
   setOtpInput: (v: string) => void;
-  busy: boolean;
+  busy: string | null;
   autopilot: boolean;
+  eta: number | null;
   onArriving: () => void;
   onArrived: () => void;
   onStart: () => void;
   onEnd: () => void;
 }) {
+  const etaMin = eta != null ? Math.max(1, Math.round(eta / 60)) : null;
   return (
     <>
       <h3>
@@ -524,15 +693,20 @@ function ActiveDriveView({
 
       {phase === "to_pickup" && (
         <>
+          {etaMin != null && (
+            <div className="eta-chip">
+              🚗 ~{etaMin} min away
+            </div>
+          )}
           {autopilot ? (
             <p className="muted">Auto-pilot is driving you to the pickup…</p>
           ) : (
             <div className="row" style={{ gap: 10 }}>
-              <button className="btn dark" onClick={onArriving} disabled={status !== "DRIVER_ASSIGNED"}>
-                Arriving
+              <button className="btn dark" onClick={onArriving} disabled={busy !== null || status !== "DRIVER_ASSIGNED"}>
+                {busy === "arriving" ? <Spinner /> : "Arriving"}
               </button>
-              <button className="btn dark" onClick={onArrived} disabled={status !== "DRIVER_ARRIVING"}>
-                Arrived
+              <button className="btn dark" onClick={onArrived} disabled={busy !== null || status !== "DRIVER_ARRIVING"}>
+                {busy === "arrived" ? <Spinner /> : "Arrived"}
               </button>
             </div>
           )}
@@ -550,15 +724,15 @@ function ActiveDriveView({
             inputMode="numeric"
             maxLength={4}
           />
-          <button className="btn go" onClick={onStart} disabled={busy || otpInput.length !== 4}>
-            {busy ? "Verifying…" : "Start trip"}
+          <button className="btn go" onClick={onStart} disabled={busy !== null || otpInput.length !== 4}>
+            {busy === "start" ? <Spinner label="Verifying…" /> : "Start trip"}
           </button>
         </>
       )}
 
       {phase === "to_drop" && (
-        <button className="btn primary" onClick={onEnd} disabled={busy}>
-          {busy ? "Ending…" : "End trip"}
+        <button className="btn primary" onClick={onEnd} disabled={busy !== null}>
+          {busy === "end" ? <Spinner label="Ending…" /> : "End trip"}
         </button>
       )}
     </>

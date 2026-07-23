@@ -205,20 +205,42 @@ func (s *Service) applySuccess(ctx context.Context, pspRef, rideID string) error
 		return fmt.Errorf("payments: success update: %w", err)
 	}
 
-	// Immutable receipt: copy the trip's fare breakdown, stamp method + ids.
-	var fareJSON []byte
+	// Immutable receipt: copy the trip's fare breakdown, stamp method + ids, and
+	// enrich with the trip metrics (distance/duration/time span) so a detailed
+	// receipt can be rendered without re-reading the trip row.
+	var (
+		fareJSON      []byte
+		distanceM     *int
+		startedAt     time.Time
+		endedAt       *time.Time
+		pausedSeconds int
+	)
 	if err := tx.QueryRow(ctx,
-		`SELECT fare FROM trips WHERE ride_id = $1`, rideID,
-	).Scan(&fareJSON); err != nil {
+		`SELECT fare, distance_m, started_at, ended_at, paused_seconds FROM trips WHERE ride_id = $1`, rideID,
+	).Scan(&fareJSON, &distanceM, &startedAt, &endedAt, &pausedSeconds); err != nil {
 		return fmt.Errorf("payments: load trip fare: %w", err)
 	}
 	breakdown := map[string]any{}
 	if len(fareJSON) > 0 {
 		_ = json.Unmarshal(fareJSON, &breakdown)
 	}
-	breakdown["method"] = method
-	breakdown["ride_id"] = rideID
-	breakdown["payment_id"] = paymentID
+	breakdown[receiptKeyMethod] = method
+	breakdown[receiptKeyRideID] = rideID
+	breakdown[receiptKeyPaymentID] = paymentID
+	// M13 enrichment — additive. Receipts written before this simply lack these
+	// keys; the frontend renders gracefully when they are absent.
+	if distanceM != nil {
+		breakdown[receiptKeyDistanceM] = *distanceM
+	}
+	if endedAt != nil {
+		durationS := int(endedAt.Sub(startedAt).Seconds()) - pausedSeconds
+		if durationS < 0 {
+			durationS = 0
+		}
+		breakdown[receiptKeyDurationS] = durationS
+		breakdown[receiptKeyStartedAt] = startedAt.UTC().Format(time.RFC3339)
+		breakdown[receiptKeyEndedAt] = endedAt.UTC().Format(time.RFC3339)
+	}
 	receiptJSON, err := json.Marshal(breakdown)
 	if err != nil {
 		return fmt.Errorf("payments: marshal receipt: %w", err)
@@ -290,12 +312,18 @@ type DriverView struct {
 	Plate string `json:"plate"`
 }
 
-// HistoryItem is one ride in a rider's history.
+// HistoryItem is one ride in a rider's history. Pickup/drop coordinates are
+// included so the detailed receipt view can resolve place names for past rides
+// (the receipt breakdown itself carries the trip metrics from M13).
 type HistoryItem struct {
 	RideID    string       `json:"ride_id"`
 	Status    string       `json:"status"`
 	Tier      string       `json:"tier"`
 	FareTotal *int         `json:"fare_total"`
+	PickupLat float64      `json:"pickup_lat"`
+	PickupLng float64      `json:"pickup_lng"`
+	DropLat   float64      `json:"drop_lat"`
+	DropLng   float64      `json:"drop_lng"`
 	CreatedAt time.Time    `json:"created_at"`
 	Driver    *DriverView  `json:"driver,omitempty"`
 	Receipt   *ReceiptView `json:"receipt,omitempty"`
@@ -306,7 +334,8 @@ type HistoryItem struct {
 // receipt (when the ride has been paid). Uses the rides_rider_history_idx index.
 func (s *Service) History(ctx context.Context, riderID string) ([]HistoryItem, error) {
 	rows, err := s.st.PG.Query(ctx, `
-		SELECT r.id, r.status, r.tier, r.fare_total, r.created_at,
+		SELECT r.id, r.status, r.tier, r.fare_total,
+		       r.pickup_lat, r.pickup_lng, r.drop_lat, r.drop_lng, r.created_at,
 		       d.name, d.plate,
 		       rc.breakdown, rc.total, rc.created_at
 		FROM rides r
@@ -330,7 +359,8 @@ func (s *Service) History(ctx context.Context, riderID string) ([]HistoryItem, e
 			rcCreatedAt   *time.Time
 		)
 		if err := rows.Scan(
-			&it.RideID, &it.Status, &it.Tier, &it.FareTotal, &it.CreatedAt,
+			&it.RideID, &it.Status, &it.Tier, &it.FareTotal,
+			&it.PickupLat, &it.PickupLng, &it.DropLat, &it.DropLng, &it.CreatedAt,
 			&dName, &dPlate,
 			&breakdownJSON, &rcTotal, &rcCreatedAt,
 		); err != nil {
