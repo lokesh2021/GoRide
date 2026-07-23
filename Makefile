@@ -12,13 +12,13 @@ migrate-down:
 	GORIDE_PG_DSN=$(GORIDE_PG_DSN) go run ./cmd/migrate down $(N)
 
 test:
-	go test ./...
+	go test ./... -race
 
 # Integration + concurrency tests (build tag `integration`) hit real Postgres
 # and Redis from GORIDE_PG_DSN / GORIDE_REDIS_ADDR. -count=1 disables the test
 # cache so they always run against live infra.
 test-integration:
-	go test -tags integration ./... -count=1
+	go test -tags integration ./... -count=1 -race
 
 vet:
 	go vet ./...

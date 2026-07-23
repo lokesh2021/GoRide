@@ -72,6 +72,50 @@ export function pointAtDistance(pts: LatLng[], dist: number): { pos: LatLng; brg
   return { pos: pts[pts.length - 1], brg: bearing(pts[pts.length - 2], pts[pts.length - 1]), done: true };
 }
 
+// Cumulative distance array for a polyline: cum[i] = metres from pts[0] to
+// pts[i] (cum[0] === 0). Precompute once per leg so per-frame lookups along a
+// dense OSRM polyline are O(log n) (binary search) instead of O(n).
+export function cumulativeDistances(pts: LatLng[]): number[] {
+  const cum = new Array<number>(pts.length);
+  cum[0] = 0;
+  for (let i = 1; i < pts.length; i++) cum[i] = cum[i - 1] + haversine(pts[i - 1], pts[i]);
+  return cum;
+}
+
+// Position + bearing at `dist` metres along a polyline, using a precomputed
+// cumulative-distance array. Binary-searches the segment; clamps at both ends.
+export function pointAtDistanceCum(
+  pts: LatLng[],
+  cum: number[],
+  dist: number,
+): { pos: LatLng; brg: number; done: boolean } {
+  if (pts.length < 2) return { pos: pts[0] ?? [0, 0], brg: 0, done: true };
+  const total = cum[cum.length - 1];
+  if (dist <= 0) return { pos: pts[0], brg: bearing(pts[0], pts[1]), done: false };
+  if (dist >= total) {
+    const n = pts.length;
+    return { pos: pts[n - 1], brg: bearing(pts[n - 2], pts[n - 1]), done: true };
+  }
+  // First index i with cum[i] > dist → target segment is (i-1, i).
+  let lo = 1;
+  let hi = pts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] <= dist) lo = mid + 1;
+    else hi = mid;
+  }
+  const i = lo;
+  const seg = cum[i] - cum[i - 1];
+  const t = seg === 0 ? 0 : (dist - cum[i - 1]) / seg;
+  return { pos: lerp(pts[i - 1], pts[i], t), brg: bearing(pts[i - 1], pts[i]), done: false };
+}
+
+// Normalise an angle delta to the shortest signed arc in [-180, 180). Used to
+// rotate the car marker the short way (avoid 350° → 10° spinning ~340°).
+export function shortestAngleDelta(from: number, to: number): number {
+  return (((to - from) % 360) + 540) % 360 - 180;
+}
+
 export function formatKm(m: number): string {
   return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
 }
