@@ -76,6 +76,15 @@ export class Api {
   getRide(id: string) {
     return request<RideView>(this.token, "GET", `/v1/rides/${id}`);
   }
+  regenerateOtp(rideId: string) {
+    return request<{ otp: string }>(this.token, "POST", `/v1/rides/${rideId}/otp`);
+  }
+  riderState(riderId: string) {
+    return request<{ active_ride: RideView | null }>(this.token, "GET", `/v1/riders/${riderId}/state`);
+  }
+  driverState(driverId: string) {
+    return request<{ status: string; active_ride: RideView | null }>(this.token, "GET", `/v1/drivers/${driverId}/state`);
+  }
   cancelRide(id: string, reason: string) {
     return request<RideView>(this.token, "POST", `/v1/rides/${id}/cancel`, { reason });
   }

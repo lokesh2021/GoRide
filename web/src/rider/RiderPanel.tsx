@@ -74,7 +74,9 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
 
   useEffect(() => onPickupChange(pickup), [pickup, onPickupChange]);
 
-  // Reset everything when the persona switches.
+  // Reset everything when the persona switches, then rehydrate any ride that
+  // is still live server-side (page refresh / tab loss must not orphan an
+  // in-flight ride — the backend has it; the client re-attaches).
   useEffect(() => {
     setRide(null);
     setStatus(null);
@@ -84,6 +86,31 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
     setPaymentStatus(null);
     setDriverPos(null);
     setShowHistory(false);
+
+    // Server-authoritative: ask the backend what this rider is in the middle
+    // of. The OTP alone comes from localStorage (delivered exactly once over
+    // SSE; the server stores only a hash), scoped to the ride id.
+    let stale = false;
+    (async () => {
+      try {
+        const st = await api.riderState(persona.id);
+        if (stale || !st.active_ride) return;
+        setRide(st.active_ride);
+        setStatus(st.active_ride.status);
+        const saved = localStorage.getItem(`goride:otp:${persona.id}`);
+        if (saved) {
+          const [savedRide, savedOtp] = saved.split(":");
+          if (savedRide === st.active_ride.id) setOtp(savedOtp);
+          else localStorage.removeItem(`goride:otp:${persona.id}`);
+        }
+      } catch {
+        // State lookup is best-effort on load; booking still works without it.
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persona.id]);
 
   // ---- SSE: subscribe to the ride channel while a ride is live ----
@@ -101,6 +128,10 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
           }
           case "ride.otp":
             setOtp((env.data as OtpData).otp);
+            // OTP is delivered exactly once (server stores only a hash) —
+            // keep it client-side, scoped to this ride, so a refresh doesn't
+            // lose it mid-pickup.
+            localStorage.setItem(`goride:otp:${persona.id}`, `${ride.id}:${(env.data as OtpData).otp}`);
             break;
           case "ride.driver_location": {
             const d = env.data as DriverLocationData;
@@ -189,6 +220,22 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
     }
   };
 
+  // Recover a lost OTP: the server re-mints it (old code invalidated) and
+  // returns it to the authenticated rider only.
+  const reissueOtp = async () => {
+    if (!ride) return;
+    setBusy(true);
+    try {
+      const res = await api.regenerateOtp(ride.id);
+      setOtp(res.otp);
+      localStorage.setItem(`goride:otp:${persona.id}`, `${ride.id}:${res.otp}`);
+    } catch (e) {
+      toast.error(e, "Could not fetch OTP");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const resetToPlan = useCallback(() => {
     setRide(null);
     setStatus(null);
@@ -197,7 +244,8 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
     setPaymentStatus(null);
     setDriverPos(null);
     prevDriverPos.current = null;
-  }, []);
+    localStorage.removeItem(`goride:otp:${persona.id}`);
+  }, [persona.id]);
 
   // ---- derived map props ----
   const route = useMemo<LatLng[] | null>(() => (pickup && drop ? buildRoute(pickup, drop) : null), [pickup, drop]);
@@ -287,7 +335,14 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
             onHistory={loadHistory}
           />
         ) : status && STATUS_RANK[status] >= 1 ? (
-          <ActiveView ride={ride} status={status} otp={otp} onCancel={canCancel(status) ? cancel : undefined} />
+          <ActiveView
+            ride={ride}
+            status={status}
+            otp={otp}
+            onCancel={canCancel(status) ? cancel : undefined}
+            onReissueOtp={reissueOtp}
+            busy={busy}
+          />
         ) : (
           <FindingView onCancel={cancel} />
         )}
@@ -442,11 +497,15 @@ function ActiveView({
   status,
   otp,
   onCancel,
+  onReissueOtp,
+  busy,
 }: {
   ride: RideView;
   status: RideStatus;
   otp: string | null;
   onCancel?: () => void;
+  onReissueOtp: () => void;
+  busy: boolean;
 }) {
   const rank = STATUS_RANK[status] ?? 0;
   const steps = [
@@ -483,6 +542,14 @@ function ActiveView({
         <div className="otp-box">
           <div className="lbl">Share this OTP with your driver</div>
           <div className="digits">{otp}</div>
+        </div>
+      )}
+      {!otp && rank >= 1 && rank < 4 && (
+        <div className="otp-box">
+          <div className="lbl">OTP not on this device (opened in a new tab?)</div>
+          <button className="btn dark" disabled={busy} onClick={onReissueOtp}>
+            Show OTP
+          </button>
         </div>
       )}
 

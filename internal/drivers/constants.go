@@ -60,6 +60,7 @@ func tripDistKey(rideID string) string { return "trip:dist:" + rideID }
 
 const (
 	logMsgClearOfferOnOfflineFailed = "drivers: clear offer on offline failed"
+	logMsgClearRideMarkerFailed     = "drivers: clear stale ride marker failed"
 	logMsgClearTripDistanceFailed   = "drivers: clear trip distance failed"
 	logMsgPublishLocationFailed     = "drivers: publish location failed"
 )

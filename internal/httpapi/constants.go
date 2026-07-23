@@ -23,5 +23,7 @@ const (
 	logMsgDeclineOfferFailed     = "declineOffer failed"
 	logMsgPspWebhookFailed       = "pspWebhook failed"
 	logMsgRiderHistoryFailed     = "riderHistory failed"
+	logMsgStateLookupFailed      = "state lookup failed"
+	logMsgOTPRegenFailed         = "otp regeneration failed"
 	logMsgHTTPRequest            = "http_request"
 )

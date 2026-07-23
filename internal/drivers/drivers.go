@@ -103,13 +103,22 @@ func (s *Service) SetAvailability(ctx context.Context, driverID string, availabl
 		target = StatusAvailable
 	}
 
-	// Optimistic guarded update: only offline/available are mutable; on_trip is
-	// locked out. RETURNING gives us tier+city for the Redis ops without a
-	// second query.
+	// Optimistic guarded update: offline/available are freely mutable; on_trip
+	// is locked out ONLY while an active ride actually exists. The NOT EXISTS
+	// arm self-heals orphaned on_trip drivers (crash/cleanup between a ride
+	// reaching a terminal state and the driver release) instead of dead-ending
+	// them behind a 409 forever. RETURNING gives us tier+city for the Redis
+	// ops without a second query.
 	var tier, city string
 	err := s.st.PG.QueryRow(ctx,
 		`UPDATE drivers SET status = $1
-		   WHERE id = $2 AND status IN ('offline','available')
+		   WHERE id = $2
+		     AND (status IN ('offline','available')
+		          OR (status = 'on_trip' AND NOT EXISTS (
+		                SELECT 1 FROM rides
+		                WHERE driver_id = $2
+		                  AND status IN ('REQUESTED','MATCHING','DRIVER_ASSIGNED',
+		                                 'DRIVER_ARRIVING','ARRIVED','IN_PROGRESS'))))
 		 RETURNING tier, city`,
 		target, driverID,
 	).Scan(&tier, &city)
@@ -142,6 +151,12 @@ func (s *Service) availabilityRejectReason(ctx context.Context, driverID string)
 }
 
 func (s *Service) goAvailable(ctx context.Context, driverID, tier, city string) error {
+	// Drop any stale active-ride marker: reaching here means Postgres agreed
+	// the driver has no active ride (incl. the orphaned-on_trip heal path),
+	// so a lingering driver:ride mirror is by definition stale.
+	if err := s.st.Redis.Del(ctx, rideKey(driverID)).Err(); err != nil {
+		s.log.Warn(logMsgClearRideMarkerFailed, "error", err, "driver_id", driverID)
+	}
 	// Refresh the mirror first so a ping racing in immediately sees available.
 	if err := s.writeMirror(ctx, driverID, statusMirror{Status: StatusAvailable, Tier: tier, City: city}); err != nil {
 		return err
@@ -174,6 +189,8 @@ func (s *Service) goOffline(ctx context.Context, driverID, tier, city string) er
 	}
 	pipe := s.st.Redis.Pipeline()
 	pipe.ZRem(ctx, geoKey(city), driverID)
+	// Same staleness argument as goAvailable: no active ride at this point.
+	pipe.Del(ctx, rideKey(driverID))
 	// Keep the mirror (now offline) so the location path knows not to GEOADD.
 	m, _ := json.Marshal(statusMirror{Status: StatusOffline, Tier: tier, City: city})
 	pipe.Set(ctx, statusKey(driverID), m, 0)

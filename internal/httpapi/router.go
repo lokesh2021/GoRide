@@ -131,6 +131,9 @@ func Routes(r chi.Router, deps Deps) {
 
 		// Ride history — rider, self only.
 		rt.Get("/riders/{id}/rides", requireRole(rides.RoleRider, deps.riderHistory))
+		rt.Get("/riders/{id}/state", requireRole(rides.RoleRider, deps.riderState))
+		rt.Post("/rides/{id}/otp", requireRole(rides.RoleRider, deps.riderOTP))
+		rt.Get("/drivers/{id}/state", requireRole(rides.RoleDriver, deps.driverState))
 	})
 }
 
