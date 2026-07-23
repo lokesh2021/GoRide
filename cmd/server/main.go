@@ -13,6 +13,7 @@ import (
 
 	"github.com/lokeshbm/goride/internal/config"
 	"github.com/lokeshbm/goride/internal/drivers"
+	"github.com/lokeshbm/goride/internal/events"
 	"github.com/lokeshbm/goride/internal/httpapi"
 	"github.com/lokeshbm/goride/internal/matching"
 	"github.com/lokeshbm/goride/internal/payments"
@@ -45,6 +46,18 @@ func main() {
 	psp := payments.NewPSP(cfg.PSPWebhookURL, cfg.PSPSecret, logger)
 	paymentSvc := payments.NewService(st, rideSvc, psp, cfg.PSPSecret, logger)
 
+	// M5: real-time fan-out. The Publisher satisfies both rides.EventPublisher
+	// and drivers.RidePublisher (structural interfaces), so one instance wires
+	// into both domain services. The Hub is built with ctx (this process's
+	// SIGINT/SIGTERM-cancelled root context) so that in-flight SSE streams are
+	// cut on shutdown even if their client never disconnects — otherwise
+	// srv.Shutdown below would block waiting for a connection that never goes
+	// idle.
+	eventPub := events.NewPublisher(st.Redis, logger)
+	rideSvc.SetEventPublisher(eventPub)
+	driverSvc.SetPublisher(eventPub)
+	eventHub := events.NewHub(ctx, st.Redis, logger)
+
 	// Wire the M3 seams into the ride service: kick matching immediately on a
 	// new MATCHING ride, and re-add a released driver to the geo pool.
 	rideSvc.MatchRequested = matchEngine.RequestMatch
@@ -66,12 +79,19 @@ func main() {
 		Match:    matchEngine,
 		Trips:    tripSvc,
 		Payments: paymentSvc,
+		Events:   eventHub,
 		Logger:   logger,
 	})
 
 	srv := &http.Server{
 		Addr:    cfg.Addr,
 		Handler: router,
+		// ReadHeaderTimeout guards against slow-header (slowloris) connections;
+		// it only bounds reading the request line + headers, so it cannot cut
+		// off the SSE endpoints below. Deliberately no WriteTimeout/ReadTimeout:
+		// either would silently sever a long-lived event stream once its
+		// deadline elapsed, mid-stream, with no way for the handler to renew it.
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
