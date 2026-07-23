@@ -11,6 +11,7 @@ type Config struct {
 	RedisAddr       string // GORIDE_REDIS_ADDR
 	Env             string // GORIDE_ENV
 	NewRelicLicense string // GORIDE_NEWRELIC_LICENSE (optional; agent disabled when empty)
+	NewRelicAppName string // GORIDE_NEWRELIC_APP_NAME (optional; defaults to "goride")
 	PSPSecret       string // GORIDE_PSP_SECRET
 	PSPWebhookURL   string // GORIDE_PSP_WEBHOOK_URL (mock PSP posts confirmations here)
 }
@@ -23,6 +24,7 @@ func Load() Config {
 		RedisAddr:       getenv("GORIDE_REDIS_ADDR", defaultRedisAddr),
 		Env:             getenv("GORIDE_ENV", defaultEnv),
 		NewRelicLicense: os.Getenv("GORIDE_NEWRELIC_LICENSE"),
+		NewRelicAppName: getenv("GORIDE_NEWRELIC_APP_NAME", defaultNewRelicAppName),
 		PSPSecret:       getenv("GORIDE_PSP_SECRET", defaultPSPSecret),
 		PSPWebhookURL:   getenv("GORIDE_PSP_WEBHOOK_URL", defaultPSPWebhookURL),
 	}

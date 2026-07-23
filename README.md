@@ -160,6 +160,31 @@ Measure first, then optimize — with numbers:
 - Dashboard: per-endpoint p95, throughput, error rate, DB time; alert policy on hot-endpoint p95 breach.
 - Deliverable: dashboard screenshots + bottleneck analysis in the performance report.
 
+### Monitoring — how it's actually wired
+
+Built with the New Relic Go agent ([`go-agent/v3`](https://github.com/newrelic/go-agent)), in `internal/observability/`.
+
+**Env vars**
+
+| Var | Required | Notes |
+|---|---|---|
+| `GORIDE_NEWRELIC_LICENSE` | No | Agent is fully disabled (clean no-op, zero behavioral change) when unset. |
+| `GORIDE_NEWRELIC_APP_NAME` | No | Defaults to `goride`. What the app shows up as in the New Relic UI. |
+
+**What gets reported (only when a license key is set):**
+
+- **HTTP transactions** — one per request, named by the resolved chi route pattern (`POST /v1/rides`, not the raw path with a UUID in it), with distributed tracing on. SSE streams (`GET /v1/events`, `GET /v1/events/driver/{id}`) are deliberately excluded — they're long-lived (potentially hours), and a "transaction" spanning one would report a nonsense duration and skew every latency percentile.
+- **Datastore segments** — every Postgres query (via the `nrpgx5` pgx tracer) and every Redis command (via the `nrredis-v9` hook) shows up as a segment under whichever transaction was in flight, so slow queries/commands are attributable to the endpoint that issued them.
+- **Custom metrics**:
+  - `Custom/Matching/OfferLatencyMs` — time from ride request to the first driver offer being claimed.
+  - `Custom/Matching/OfferAccepted`, `Custom/Matching/OfferDeclined` — per-offer outcomes.
+  - `Custom/Matching/OfferExpired` — a ride's matching window (60s / candidates exhausted) ran out with no driver accepting.
+  - `Custom/Payments/Succeeded`, `Custom/Payments/Failed` — mock-PSP webhook outcomes.
+
+**Where to look in the NR UI:** APM → `goride` → *Transactions* for per-route p50/p95/throughput, *Databases* for Postgres/Redis segment time, and *Metrics & events* (or a custom dashboard chart on `Custom/...`) for the metrics above.
+
+**No key, no problem:** every integration point here is nil-safe by construction (the go-agent v3 API documents every `*newrelic.Application`/`*newrelic.Transaction` method as a no-op on a nil receiver), so with `GORIDE_NEWRELIC_LICENSE` unset the server starts, logs that monitoring is disabled, and behaves identically to a build with no New Relic dependency at all.
+
 ## 8. Frontend — Rider App + Driver App
 
 React + Vite SPA styled like a real booking app, over a live **Leaflet map** (OpenStreetMap tiles — free, no API key). Demo bounded to Bengaluru so movement looks real.

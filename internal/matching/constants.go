@@ -17,6 +17,20 @@ const (
 	uniqueViolation = "23505"
 )
 
+// ---- custom metrics (New Relic; see Engine.obs) ----
+
+const (
+	// metricOfferLatencyMs is request→offer latency: ride created_at to the
+	// first offer claimed for it, recorded in offerNext.
+	metricOfferLatencyMs = "Custom/Matching/OfferLatencyMs"
+	metricOfferAccepted  = "Custom/Matching/OfferAccepted"
+	metricOfferDeclined  = "Custom/Matching/OfferDeclined"
+	// metricOfferExpired counts rides whose matching window expired with no
+	// driver ever accepting (sweep's matchDeadline branch) — a per-ride
+	// outcome, distinct from the per-offer accepted/declined counters above.
+	metricOfferExpired = "Custom/Matching/OfferExpired"
+)
+
 // ---- event types ----
 
 const (

@@ -16,6 +16,7 @@ import (
 	"github.com/lokeshbm/goride/internal/events"
 	"github.com/lokeshbm/goride/internal/httpapi"
 	"github.com/lokeshbm/goride/internal/matching"
+	"github.com/lokeshbm/goride/internal/observability"
 	"github.com/lokeshbm/goride/internal/payments"
 	"github.com/lokeshbm/goride/internal/quotes"
 	"github.com/lokeshbm/goride/internal/rides"
@@ -31,6 +32,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Constructed first (before the store) since the pgx pool's nrpgx5 tracer
+	// and the router's transaction middleware both need it; nil (monitoring
+	// disabled) flows through every seam below unchanged — see
+	// internal/observability's doc comment for the nil-safety design.
+	obs := observability.New(cfg, logger)
+	defer obs.Shutdown(10 * time.Second)
+
 	st, err := store.New(ctx, cfg)
 	if err != nil {
 		logger.Error("failed to connect to store", "error", err)
@@ -42,9 +50,11 @@ func main() {
 	rideSvc := rides.NewService(st, quoteSvc, logger)
 	driverSvc := drivers.NewService(st, logger)
 	matchEngine := matching.NewEngine(st, rideSvc, driverSvc, logger)
+	matchEngine.SetObservability(obs)
 	tripSvc := trips.NewService(st, rideSvc, driverSvc, quoteSvc, logger)
 	psp := payments.NewPSP(cfg.PSPWebhookURL, cfg.PSPSecret, logger)
 	paymentSvc := payments.NewService(st, rideSvc, psp, cfg.PSPSecret, logger)
+	paymentSvc.SetObservability(obs)
 
 	// M5: real-time fan-out. The Publisher satisfies both rides.EventPublisher
 	// and drivers.RidePublisher (structural interfaces), so one instance wires
@@ -81,6 +91,7 @@ func main() {
 		Payments: paymentSvc,
 		Events:   eventHub,
 		Logger:   logger,
+		Obs:      obs,
 	})
 
 	srv := &http.Server{

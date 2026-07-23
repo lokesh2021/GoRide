@@ -10,10 +10,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/newrelic/go-agent/v3/newrelic"
 
 	"github.com/lokeshbm/goride/internal/drivers"
 	"github.com/lokeshbm/goride/internal/events"
 	"github.com/lokeshbm/goride/internal/matching"
+	"github.com/lokeshbm/goride/internal/observability"
 	"github.com/lokeshbm/goride/internal/payments"
 	"github.com/lokeshbm/goride/internal/quotes"
 	"github.com/lokeshbm/goride/internal/rides"
@@ -41,6 +43,10 @@ type Deps struct {
 	Payments *payments.Service
 	Events   *events.Hub
 	Logger   *slog.Logger
+	// Obs is the New Relic application (nil when monitoring is disabled per
+	// GORIDE_NEWRELIC_LICENSE). NewRouter wires it in as per-request
+	// transaction middleware; nil makes that middleware a pass-through no-op.
+	Obs *newrelic.Application
 }
 
 // NewRouter builds the chi router with base middleware and mounted routes.
@@ -56,6 +62,9 @@ func NewRouter(deps Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(requestLogger(deps.Logger))
 	r.Use(middleware.Recoverer)
+	// New Relic transaction per request, named by the resolved chi route
+	// pattern (SSE streams excluded — see observability.Middleware doc).
+	r.Use(observability.Middleware(deps.Obs))
 
 	Routes(r, deps)
 
