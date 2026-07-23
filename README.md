@@ -2,7 +2,7 @@
 
 A ride-hailing platform (think Uber/Ola) built for the SDE-2 assessment: upfront fare quotes, driver–rider matching, dynamic surge pricing, full trip lifecycle with OTP verification, payments, receipts, real-time tracking, and production-grade monitoring.
 
-> **Status:** Planning. This README is the execution plan; implementation follows the milestones in [§10](#10-execution-milestones-pr-plan).
+> **Status:** Built. Backend, frontend, tests, and monitoring are implemented — the PR history in [§10](#10-execution-milestones-pr-plan) tracks how each milestone landed. Quickstart at the [bottom](#running-locally); demo walkthrough in [docs/DEMO.md](docs/DEMO.md); design docs in [docs/HLD.md](docs/HLD.md) and [docs/SPEC.md](docs/SPEC.md).
 
 **Scale targets (from the assignment, kept in mind throughout):** ~100k drivers, ~10k ride requests/min, ~200k location updates/sec, matching within 1s p95.
 
@@ -210,35 +210,45 @@ All live updates via SSE; markers animate between updates so movement looks cont
 
 ## 10. Execution Milestones (PR Plan)
 
-Work lands as small, reviewable PRs — each independently green:
+Work landed as small, reviewable PRs — each independently green:
 
 | PR | Scope |
 |---|---|
-| 1 | Scaffold: repo layout, Docker Compose, config, health endpoint, test/lint scripts |
-| 2 | Migrations, data model, store layer (Postgres + Redis) |
-| 3 | Quotes + pricing/surge + rides API with state machine |
-| 4 | Driver APIs: location ingestion, availability, matching, offer accept/decline/timeout |
-| 5 | Trip lifecycle (OTP start, pause, end), fare finalization, payments (mock PSP), receipts, idempotency |
-| 6 | SSE events (Redis pub/sub) + React rider/driver apps with live map + bot simulator |
-| 7 | New Relic integration, k6 load tests, latency optimizations |
-| 8 | Docs: HLD/LLD, performance report, demo script |
+| #1 | Scaffold: repo layout, Docker Compose, config, health endpoint, full schema migrations |
+| #2 | Quotes, pricing/surge engine, rides API with state machine, auth + idempotency |
+| #3 | Driver APIs, location ingestion hot path, matching engine (atomic offers, sweeper) |
+| #4 | Trip lifecycle (OTP start, pause, end), metered fare finalization, payments, receipts |
+| #5 | Real-time events: SSE streaming over Redis pub/sub (cross-instance verified) |
+| #6 | Refactor: constants and log-message segregation per package |
+| #7 | Test hardening: validation matrix + concurrency invariants under `-race` |
+| #8 | Frontend: rider & driver app with live map and bot simulator |
+| #9 | Fix: cancel/accept race on driver release (found by #7's review) |
+| #10 | Observability: New Relic APM wiring + k6 load scenarios |
 
 ## 11. Deliverables Checklist
 
 Mapped 1:1 to the assignment:
 
-- [ ] Backend code (Go) — APIs with validation + idempotency, clean state transitions, edge cases (timeouts, declines, retries, cancellations)
-- [ ] Frontend code (React) — real booking flow with live map tracking
-- [ ] New Relic performance report — dashboards, bottleneck analysis, before/after latency numbers
-- [ ] Documentation — HLD, LLD, this README, demo script
-- [ ] Unit + concurrency tests
-- [ ] PR history — small, reviewable, well-described changes
+- [x] Backend code (Go) — APIs with validation + idempotency, clean state transitions, edge cases (timeouts, declines, retries, cancellations)
+- [x] Frontend code (React) — real booking flow with live map tracking
+- [ ] New Relic performance report — dashboards, bottleneck analysis, before/after latency numbers (`docs/performance-report.md`; needs a license key to capture dashboards)
+- [x] Documentation — HLD ([docs/HLD.md](docs/HLD.md)), LLD ([docs/SPEC.md](docs/SPEC.md)), this README, demo script ([docs/DEMO.md](docs/DEMO.md))
+- [x] Unit + concurrency tests (`make test`, `make test-integration` — both `-race`-clean)
+- [x] PR history — small, reviewable, well-described changes
 
-## Running Locally (target DX)
+## Running Locally
 
 ```bash
-docker compose up -d        # Postgres + Redis
-make migrate                # apply schema
-make run                    # start API on :8080
-cd web && npm run dev       # frontend on :5173
+docker compose up -d        # Postgres + Redis (skip if you run them natively)
+make migrate                # apply schema + demo seed
+make run                    # API on :8080
+cd web && npm install && npm run dev   # app on :5173 (auto-bumps if the port is taken)
+```
+
+Demo identities (seeded): riders `rider1-token`/`rider2-token`, drivers `driver1-token`…`driver6-token` (2 per tier, Bengaluru). The frontend's persona pickers use these automatically. Full walkthrough: [docs/DEMO.md](docs/DEMO.md).
+
+```bash
+make test               # unit suites
+make test-integration   # concurrency/invariant suites (needs live Postgres+Redis)
+psql -d goride -f loadtest/seed_load.sql && k6 run loadtest/mixed.js   # load test
 ```

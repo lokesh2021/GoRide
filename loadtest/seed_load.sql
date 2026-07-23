@@ -1,13 +1,11 @@
--- Provision load-test identities used by loadtest/mixed.js.
--- Idempotent: safe to run repeatedly. Remove with loadtest/clean_load.sql.
+-- Provision load-test identities used by loadtest/mixed.js: 20 riders,
+-- 50 drivers. Idempotent: safe to run repeatedly. Remove with
+-- loadtest/clean_load.sql.
 --
 --   psql -d goride -f loadtest/seed_load.sql
---   psql -d goride -v n_riders=20 -v n_drivers=50 -f loadtest/seed_load.sql
 
-\set n_riders  :{?n_riders}
-\set n_drivers :{?n_drivers}
-SELECT COALESCE(NULLIF(:'n_riders',  ''), '20')::int  AS n_riders  \gset
-SELECT COALESCE(NULLIF(:'n_drivers', ''), '50')::int  AS n_drivers \gset
+\set n_riders  20
+\set n_drivers 50
 
 -- Deterministic UUIDs (2000…/3000… prefixes) so load scripts can address
 -- drivers by path id without a lookup: rider i = 20000000-…-<i>, driver i =
@@ -24,7 +22,7 @@ INSERT INTO drivers (id, name, phone, city, tier, vehicle_model, plate, rating, 
 SELECT ('30000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid,
        'Load Driver ' || i,
        '+9191000' || lpad(i::text, 5, '0'),
-       'BLR',
+       'LDT',  -- dedicated load-test city shard: load supply/demand never mixes with the BLR demo pool
        (ARRAY['mini','sedan','xl'])[1 + (i % 3)],
        (ARRAY['Maruti Alto','Honda City','Toyota Innova'])[1 + (i % 3)],
        'KA-05-LT-' || lpad(i::text, 4, '0'),

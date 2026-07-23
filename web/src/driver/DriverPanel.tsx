@@ -386,9 +386,16 @@ function OnlineView({
             {online ? "Waiting for ride offers…" : "Go online to receive offers"}
           </p>
         </div>
-        <div className={`toggle ${online ? "on" : ""}`} onClick={() => onToggle(!online)}>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={online}
+          aria-label={online ? "Go offline" : "Go online"}
+          className={`toggle ${online ? "on" : ""}`}
+          onClick={() => onToggle(!online)}
+        >
           <div className="knob" />
-        </div>
+        </button>
       </div>
 
       <div className="dcard">
@@ -416,9 +423,16 @@ function OnlineView({
           <div style={{ fontWeight: 600 }}>Auto-pilot</div>
           <div className="muted">Auto-drive to pickup and mark arriving/arrived</div>
         </div>
-        <div className={`toggle ${autopilot ? "on" : ""}`} onClick={() => setAutopilot(!autopilot)}>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autopilot}
+          aria-label="Auto-pilot"
+          className={`toggle ${autopilot ? "on" : ""}`}
+          onClick={() => setAutopilot(!autopilot)}
+        >
           <div className="knob" />
-        </div>
+        </button>
       </div>
     </>
   );

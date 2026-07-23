@@ -104,9 +104,16 @@ export default function App() {
 
             <div className="row" style={{ gap: 8, fontSize: 13, fontWeight: 600 }}>
               Demo mode
-              <div className={`toggle ${demo ? "on" : ""}`} onClick={() => setDemo(!demo)}>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={demo}
+                aria-label="Demo mode"
+                className={`toggle ${demo ? "on" : ""}`}
+                onClick={() => setDemo(!demo)}
+              >
                 <div className="knob" />
-              </div>
+              </button>
             </div>
           </div>
         </header>
