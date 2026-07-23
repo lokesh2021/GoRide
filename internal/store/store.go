@@ -8,7 +8,6 @@ import (
 	"runtime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/newrelic/go-agent/v3/integrations/nrpgx5"
 	nrredis "github.com/newrelic/go-agent/v3/integrations/nrredis-v9"
 	"github.com/redis/go-redis/v9"
 
@@ -48,7 +47,7 @@ func New(ctx context.Context, cfg config.Config) (*Store, error) {
 	pgCfg.MaxConnLifetime = pgMaxConnLifetime
 	pgCfg.MaxConnIdleTime = pgMaxConnIdleTime
 	pgCfg.HealthCheckPeriod = pgHealthCheckPeriod
-	pgCfg.ConnConfig.Tracer = nrpgx5.NewTracer()
+	pgCfg.ConnConfig.Tracer = newQueryOnlyTracer()
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {

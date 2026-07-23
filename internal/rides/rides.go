@@ -7,15 +7,18 @@ package rides
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/lokeshbm/goride/internal/quotes"
 	"github.com/lokeshbm/goride/internal/store"
@@ -312,6 +315,67 @@ func (s *Service) PublishDriver(ctx context.Context, driverID, eventType string,
 // LoadView loads a ride view straight from Postgres with no authorization
 // check. Exported for internal callers (matching) that have already authorized
 // the actor by other means.
+// RegenerateOTP mints a fresh trip-start OTP for the ride's rider. The server
+// stores only a bcrypt hash, so a rider who loses the delivered OTP (refresh,
+// new device) would otherwise be stranded pre-trip; regeneration invalidates
+// the old code and returns the new one to the authenticated rider only.
+// Legal while a driver is assigned but the trip has not started.
+func (s *Service) RegenerateOTP(ctx context.Context, rideID, riderID string) (string, error) {
+	otp, err := generateOTP()
+	if err != nil {
+		return "", fmt.Errorf("rides: generate otp: %w", err)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(otp), bcrypt.DefaultCost)
+	if err != nil {
+		return "", fmt.Errorf("rides: hash otp: %w", err)
+	}
+	tag, err := s.st.PG.Exec(ctx, `
+		UPDATE rides SET otp_hash = $1, updated_at = now()
+		WHERE id = $2 AND rider_id = $3
+		  AND status IN ('DRIVER_ASSIGNED','DRIVER_ARRIVING','ARRIVED')`,
+		string(hash), rideID, riderID)
+	if err != nil {
+		return "", fmt.Errorf("rides: regenerate otp: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return "", ErrInvalidState
+	}
+	return otp, nil
+}
+
+// generateOTP returns a uniformly-random 4-digit OTP using crypto/rand.
+func generateOTP() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(10000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%04d", n.Int64()), nil
+}
+
+// ActiveFor returns the actor's current non-terminal ride view, or nil when
+// none exists. The partial unique indexes guarantee at most one row and make
+// the lookup an index-only probe. Role is RoleRider or RoleDriver.
+func (s *Service) ActiveFor(ctx context.Context, actorID, role string) (*View, error) {
+	col := "rider_id"
+	if role == RoleDriver {
+		col = "driver_id"
+	}
+	var id string
+	err := s.st.PG.QueryRow(ctx, `
+		SELECT id FROM rides
+		WHERE `+col+` = $1
+		  AND status IN ('REQUESTED','MATCHING','DRIVER_ASSIGNED',
+		                 'DRIVER_ARRIVING','ARRIVED','IN_PROGRESS')`, actorID,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("rides: active lookup: %w", err)
+	}
+	return s.LoadView(ctx, id)
+}
+
 func (s *Service) LoadView(ctx context.Context, id string) (*View, error) {
 	return s.load(ctx, id)
 }

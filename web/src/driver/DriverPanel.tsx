@@ -69,13 +69,42 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
 
   const phase = phaseFor(status);
 
-  // Reset on persona switch.
+  // Reset on persona switch, then rehydrate an in-flight assignment: a page
+  // refresh must not orphan a driver mid-ride (the backend still has them
+  // on_trip; the client re-attaches and the drive loop resumes).
   useEffect(() => {
     setOnline(false);
     setRide(null);
     setStatus(null);
     setOffer(null);
     setOtpInput("");
+
+    // Server-authoritative: the backend knows whether this driver is online
+    // and mid-assignment (works across devices and after storage loss).
+    let stale = false;
+    (async () => {
+      try {
+        const st = await api.driverState(persona.id);
+        if (stale) return;
+        if (st.active_ride) {
+          setRide(st.active_ride);
+          setStatus(st.active_ride.status);
+          setOnline(true); // on_trip server-side
+          sentRef.current = {
+            arriving: st.active_ride.status !== "DRIVER_ASSIGNED",
+            arrived: st.active_ride.status === "ARRIVED" || st.active_ride.status === "IN_PROGRESS",
+          };
+        } else if (st.status === "available") {
+          setOnline(true); // was online before the refresh; stay online
+        }
+      } catch {
+        // Best-effort on load; the toggle still works without it.
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persona.id]);
 
   const goOnline = async (v: boolean) => {
@@ -223,7 +252,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
     setStatus(null);
     setOtpInput("");
     sentRef.current = { arriving: false, arrived: false };
-  }, []);
+  }, [persona.id]);
 
   // ---- 1s driving + ping loop ----
   useEffect(() => {

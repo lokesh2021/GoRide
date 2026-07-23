@@ -47,6 +47,22 @@ function ClickCatcher({ picking, onPick }: { picking?: "pickup" | "drop" | null;
   return null;
 }
 
+// Keeps Leaflet's internal size in sync with the panel: the full-viewport
+// layout sizes panels with flex/grid AFTER first paint, and Leaflet only
+// measures its container once at init — without this, tiles render for the
+// stale (smaller) size and most of the map stays blank.
+function InvalidateOnResize() {
+  const map = useMap();
+  useEffect(() => {
+    const el = map.getContainer();
+    const ro = new ResizeObserver(() => map.invalidateSize());
+    ro.observe(el);
+    map.invalidateSize();
+    return () => ro.disconnect();
+  }, [map]);
+  return null;
+}
+
 // Fits the map to the given points whenever they change materially.
 function FitBounds({ points }: { points: LatLng[] }) {
   const map = useMap();
@@ -101,7 +117,11 @@ export function MapView(props: MapViewProps) {
   const { center, pickup, drop, route, car, carBearing = 0, bots = [], picking, onPick, fitPoints } = props;
 
   return (
-    <MapContainer center={center} zoom={13} zoomControl={false} attributionControl={false} className="leaflet-container">
+    // fadeAnimation off: tile fade depends on requestAnimationFrame, which
+    // backgrounded/embedded tabs throttle — tiles could stick at opacity 0.
+    // Instant tiles are also the right feel for a console UI.
+    <MapContainer center={center} zoom={13} zoomControl={false} attributionControl={false} fadeAnimation={false} className="leaflet-container">
+      <InvalidateOnResize />
       <TileLayer
         // CartoDB Positron (light) tiles — OpenStreetMap data, free, no API key.
         // OSM + CARTO attribution kept per tile usage policy.
