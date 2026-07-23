@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -43,6 +44,9 @@ type Deps struct {
 	Payments *payments.Service
 	Events   *events.Hub
 	Logger   *slog.Logger
+	// SlowRequestMs is the duration threshold (ms) above which requestLogger
+	// emits a request at Warn level instead of Info (GORIDE_SLOW_REQUEST_MS).
+	SlowRequestMs int
 	// Obs is the New Relic application (nil when monitoring is disabled per
 	// GORIDE_NEWRELIC_LICENSE). NewRouter wires it in as per-request
 	// transaction middleware; nil makes that middleware a pass-through no-op.
@@ -60,7 +64,7 @@ func NewRouter(deps Deps) http.Handler {
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(requestLogger(deps.Logger))
+	r.Use(requestLogger(deps.Logger, int64(deps.SlowRequestMs)))
 	r.Use(middleware.Recoverer)
 	// New Relic transaction per request, named by the resolved chi route
 	// pattern (SSE streams excluded — see observability.Middleware doc).
@@ -138,7 +142,15 @@ func Routes(r chi.Router, deps Deps) {
 }
 
 // requestLogger logs each request via slog, tagged with the chi request ID.
-func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
+//
+// The log level reflects the outcome so operators can alert on it: status>=500
+// → Error, status>=400 or a slow response (duration_ms > slowMs) → Warn, else
+// Info. The chi route PATTERN (e.g. "/v1/rides/{id}") is read AFTER
+// next.ServeHTTP — it is only known once chi has finished routing — and logged
+// as "route" so lines aggregate by endpoint instead of by raw UUID path. SSE
+// stream routes are never slow-warned: they are long-lived by design, so a
+// large duration_ms is expected and is not a latency signal.
+func requestLogger(logger *slog.Logger, slowMs int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			start := time.Now()
@@ -146,14 +158,27 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(ww, req)
 
-			logger.Info(logMsgHTTPRequest,
+			duration := time.Since(start).Milliseconds()
+			status := ww.Status()
+			attrs := []any{
 				"request_id", middleware.GetReqID(req.Context()),
 				"method", req.Method,
 				"path", req.URL.Path,
-				"status", ww.Status(),
+				"route", chi.RouteContext(req.Context()).RoutePattern(),
+				"status", status,
 				"bytes", ww.BytesWritten(),
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
+				"duration_ms", duration,
+			}
+
+			isSSE := strings.HasPrefix(req.URL.Path, sseRoutePathPrefix)
+			switch {
+			case status >= http.StatusInternalServerError:
+				logger.Error(logMsgHTTPRequest, attrs...)
+			case status >= http.StatusBadRequest || (!isSSE && duration > slowMs):
+				logger.Warn(logMsgHTTPRequest, attrs...)
+			default:
+				logger.Info(logMsgHTTPRequest, attrs...)
+			}
 		})
 	}
 }
