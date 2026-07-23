@@ -292,6 +292,10 @@ body {
   border: 1px solid var(--line);
   cursor: pointer;
   transition: background 0.2s ease;
+  /* toggles are <button role="switch">: neutralize UA button styling */
+  padding: 0;
+  flex-shrink: 0;
+  font: inherit;
   flex-shrink: 0;
 }
 .toggle.on {

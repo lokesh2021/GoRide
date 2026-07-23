@@ -16,6 +16,7 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Trend, Rate } from 'k6/metrics';
+import exec from 'k6/execution';
 
 const BASE = __ENV.BASE || 'http://localhost:8080';
 const N_DRIVERS = parseInt(__ENV.DRIVERS || '30');
@@ -63,8 +64,12 @@ function authHeaders(token) {
 
 // Each driver VU: go online once, then ping ~1/sec drifting around the city.
 export function driverLoop() {
-  const id = `30000000-0000-0000-0000-${String(__VU).padStart(12, '0')}`;
-  const token = `driverload-${__VU}-token`;
+  // VU ids are global across scenarios, allocated in scenario declaration
+  // order: driver_pings is declared first so its constant-vus pool gets ids
+  // 1..N_DRIVERS, and rider_flow gets the next N_RIDERS ids.
+  const vu = exec.vu.idInTest;
+  const id = `30000000-0000-0000-0000-${String(vu).padStart(12, '0')}`;
+  const token = `driverload-${vu}-token`;
   const me = point();
 
   if (__ITER === 0) {
@@ -80,10 +85,14 @@ export function driverLoop() {
 
 // Each rider VU: quote → book → poll status a few times → cancel → repeat.
 export function riderLoop() {
-  const token = `riderload-${__VU}-token`;
+  // See driverLoop: rider VU ids start after the driver pool.
+  const vu = exec.vu.idInTest - N_DRIVERS;
+  const token = `riderload-${vu}-token`;
   const h = authHeaders(token);
 
-  const q = http.post(`${BASE}/v1/quotes`, JSON.stringify({ pickup: point(), drop: point(), city: 'BLR' }), h);
+  // 'LDT' is the load test's own city shard — same code paths, but its geo
+  // pool, surge cells and offers are fully isolated from the BLR demo city.
+  const q = http.post(`${BASE}/v1/quotes`, JSON.stringify({ pickup: point(), drop: point(), city: 'LDT' }), h);
   quoteLatency.add(q.timings.duration);
   if (!check(q, { 'quote 200': (r) => r.status === 200 })) { sleep(2); return; }
   const quoteID = q.json('quote_id') || q.json('id');
