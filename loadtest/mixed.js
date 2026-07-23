@@ -22,6 +22,13 @@ const BASE = __ENV.BASE || 'http://localhost:8080';
 const N_DRIVERS = parseInt(__ENV.DRIVERS || '30');
 const N_RIDERS = parseInt(__ENV.VUS_RIDERS || '10');
 
+// How many identities loadtest/seed_load.sql actually provisions. VU IDs are
+// mapped into these ranges with modulo so every VU resolves to a real seeded
+// token regardless of how k6 numbers VUs across scenarios (idInTest is NOT
+// guaranteed contiguous per scenario — assuming so caused spurious 401s).
+const SEEDED_DRIVERS = 50;
+const SEEDED_RIDERS = 20;
+
 const quoteLatency = new Trend('goride_quote_latency', true);
 const bookLatency = new Trend('goride_book_latency', true);
 const statusLatency = new Trend('goride_status_latency', true);
@@ -64,10 +71,9 @@ function authHeaders(token) {
 
 // Each driver VU: go online once, then ping ~1/sec drifting around the city.
 export function driverLoop() {
-  // VU ids are global across scenarios, allocated in scenario declaration
-  // order: driver_pings is declared first so its constant-vus pool gets ids
-  // 1..N_DRIVERS, and rider_flow gets the next N_RIDERS ids.
-  const vu = exec.vu.idInTest;
+  // Map this VU into the seeded driver range (1..SEEDED_DRIVERS) so the token
+  // always exists, whatever idInTest k6 assigned.
+  const vu = ((exec.vu.idInTest - 1) % SEEDED_DRIVERS) + 1;
   const id = `30000000-0000-0000-0000-${String(vu).padStart(12, '0')}`;
   const token = `driverload-${vu}-token`;
   const me = point();
@@ -85,8 +91,8 @@ export function driverLoop() {
 
 // Each rider VU: quote → book → poll status a few times → cancel → repeat.
 export function riderLoop() {
-  // See driverLoop: rider VU ids start after the driver pool.
-  const vu = exec.vu.idInTest - N_DRIVERS;
+  // Map into the seeded rider range (1..SEEDED_RIDERS) — see driverLoop.
+  const vu = ((exec.vu.idInTest - 1) % SEEDED_RIDERS) + 1;
   const token = `riderload-${vu}-token`;
   const h = authHeaders(token);
 
