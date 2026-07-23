@@ -31,6 +31,7 @@ flowchart LR
     H -->|publish events| RD
     P -->|signed webhook| H
 ```
+*Component diagram: rider and driver clients only ever talk to stateless API instances; every instance embeds the same handlers, matching engine + sweeper, SSE hub, and mock PSP, and all shared state lives in PostgreSQL and Redis rather than in the process.*
 
 **Why a monolith.** The assignment allows synchronous APIs; the graded qualities (correct state transitions, consistency under concurrency, latency, monitoring) are orthogonal to service count. Package boundaries (`rides`, `matching`, `drivers`, `trips`, `payments`, `pricing`, `quotes`, `events`) mirror what would become services if the team/scale demanded it — the seams (interfaces like `EventPublisher`, structural interfaces between packages) are the future RPC boundaries.
 
@@ -38,6 +39,97 @@ flowchart LR
 - No in-process session or ride state; caches are Redis-backed.
 - SSE fan-out goes through Redis pub/sub, so any instance serves any client's stream regardless of where the state change happened (verified cross-instance in the M5 test run).
 - The matching sweeper coordinates through `FOR UPDATE SKIP LOCKED` — N instances can all run it with no leader election; each ride is processed by exactly one sweeper pass at a time.
+
+### Deployment and horizontal scaling
+
+```mermaid
+flowchart TB
+    LB["Load balancer"]
+
+    subgraph pool ["API instance pool - stateless, identical code"]
+      I1["API instance 1"]
+      I2["API instance 2"]
+      I3["API instance N"]
+    end
+
+    PG[("PostgreSQL primary - source of truth")]
+    RD[("Redis - geo index, offers, caches, pub/sub")]
+
+    LB --> I1
+    LB --> I2
+    LB --> I3
+    I1 --> PG
+    I2 --> PG
+    I3 --> PG
+    I1 --> RD
+    I2 --> RD
+    I3 --> RD
+```
+*No instance holds ride or session state in-process; every instance is behind the same load balancer and reaches the same Postgres primary and Redis, so the pool scales horizontally just by adding instances.*
+
+### Real-time SSE fan-out over Redis pub/sub (cross-instance)
+
+The statelessness claim above only holds if a client streaming from one instance still sees a state change made on another. It does, because every instance publishes to and subscribes from the same Redis channels rather than holding subscriber state in memory.
+
+```mermaid
+sequenceDiagram
+    participant InstanceA as API instance A
+    participant RD as Redis PubSub
+    participant InstanceB as API instance B
+    participant Client as Client - SSE on instance B
+
+    Client->>InstanceB: GET /v1/events?ride_id={id}
+    InstanceB->>RD: SUBSCRIBE events:ride:{id}
+    Note over InstanceB,RD: subscription held open for the life of the SSE stream
+
+    InstanceA->>InstanceA: handles a mutating request - e.g. POST /v1/drivers/{id}/accept
+    InstanceA->>InstanceA: guarded UPDATE ride status in Postgres, invalidate ride:cache:{id}
+    InstanceA->>RD: PUBLISH events:ride:{id} - type ride.status_changed
+    RD-->>InstanceB: message delivered on the subscribed channel
+    InstanceB-->>Client: SSE frame - event: ride.status_changed, data: {...}
+```
+*Instance A never talks to the client directly. Any instance can serve any client's stream because state changes are handed off through Redis pub/sub, not process memory - this is what "stateless" means in practice.*
+
+### End-to-end ride lifecycle (high level)
+
+This is the full happy path across the state machines in [SPEC.md](SPEC.md); the LLD documents each transition's guarded UPDATE and error cases in detail.
+
+```mermaid
+sequenceDiagram
+    participant Rider
+    participant API
+    participant Matching as Matching engine
+    participant Driver
+
+    Rider->>API: POST /v1/quotes - pickup, drop, tier
+    API-->>Rider: quote_id, per-tier prices, surge, expires_at
+
+    Rider->>API: POST /v1/rides - quote_id
+    API->>Matching: RequestMatch - ride REQUESTED to MATCHING
+    Matching->>Matching: GEOSEARCH geo:drivers:{city}, claim offer:driver:{d} SET NX
+    Matching->>Driver: ride.offer event on events:driver:{driver_id}
+
+    Driver->>API: POST /v1/drivers/{id}/accept
+    API-->>Rider: ride.status_changed DRIVER_ASSIGNED + ride.otp event
+
+    Driver->>API: POST /v1/rides/{id}/arriving
+    API-->>Rider: ride.status_changed DRIVER_ARRIVING
+    Driver->>API: POST /v1/rides/{id}/arrived
+    API-->>Rider: ride.status_changed ARRIVED
+
+    Driver->>API: POST /v1/trips/{id}/start - OTP
+    API-->>Rider: ride.status_changed IN_PROGRESS
+
+    Driver->>API: POST /v1/trips/{id}/end
+    API-->>Rider: ride.status_changed COMPLETED, fare_total
+
+    Rider->>API: POST /v1/payments - ride_id
+    API-->>Rider: payment.updated PROCESSING
+    Note over API: mock PSP posts a signed webhook 300-800ms later
+    API->>API: POST /v1/webhooks/psp - verify HMAC, PROCESSING to SUCCEEDED, write receipt
+    API-->>Rider: payment.updated SUCCEEDED
+```
+*High-level happy path only; cancellation, decline/timeout re-offering, EXPIRED, and payment FAILED/retry branches are covered in SPEC.md's state machines.*
 
 ## 2. Hot paths vs. the scale targets
 
@@ -49,6 +141,27 @@ The ping path is: auth → validate → **2 pipelined Redis round-trips, zero Po
 Arithmetic: one ping ≈ 6 Redis ops in 2 pipelines. 200k pings/sec ≈ 1.2M Redis ops/sec — beyond one node, exactly at the comfortable range of a small Redis Cluster. The keys are already **sharded by city** (`geo:drivers:{city}`), which is also the natural cluster-slot and multi-region partitioning dimension: a city's drivers, demand counters and offers are colocated and never referenced cross-city.
 
 Back-pressure: per-driver token bucket (3/sec) rejects abusive clients at the cheapest point.
+
+```mermaid
+sequenceDiagram
+    participant Drv as Driver app
+    participant API as API instance
+    participant RD as Redis
+
+    Drv->>API: POST /v1/drivers/{id}/location - lat, lng
+    API->>API: auth actor - Bearer token - and validate lat/lng
+    API->>RD: rt1 pipeline - INCR ratelimit:loc:{id}:{sec} + EXPIRE, GET driver:status:{id}, GET driver:ride:{id}, GET driver:last:{id}
+    RD-->>API: ping count + status/ride mirrors + previous fix
+    alt over 3 pings/sec
+      API-->>Drv: 429 rate limited
+    else within limit
+      API->>RD: rt2 pipeline - SET driver:last:{id} EX 30, GEOADD geo:drivers:{city} if available, SETNX loc:pub token if on a ride, INCRBYFLOAT trip:dist if on a ride
+      RD-->>API: OK
+      API-->>Drv: 200 OK
+    end
+    Note over API,RD: 2 pipelined Redis round-trips, zero Postgres reads or writes on this path
+```
+*Roughly 6 Redis ops per ping across the two pipelines; 200k pings/sec is about 1.2M Redis ops/sec, which is beyond one node but comfortably inside a small Redis Cluster - and the `geo:drivers:{city}` keying is already the natural cluster-slot boundary.*
 
 ### 2.2 Matching (≤1s p95)
 - Candidate search is one `GEOSEARCH` on the city shard (~ms) filtered by tier/freshness via Redis mirrors — no Postgres in the search loop.
@@ -83,6 +196,37 @@ Invariants and their enforcement (assignment §5):
 | Message queues | In-process hooks + sweeper | If offer orchestration outgrows the sweeper (multi-step timeouts, driver-app push retries), the `MatchRequested` seam becomes a queue producer. Nothing else assumes synchrony. |
 | Real PSP | Mock with signed async webhooks | The webhook contract (HMAC, idempotent on `psp_ref`, retryable trigger) is exactly the real-PSP shape; swap the in-process poster for the provider SDK. |
 | Push notifications | SSE only | The `EventPublisher` seam is the single emission point; an APNs/FCM publisher composes alongside the SSE one. |
+
+### Multi-region / city-sharding evolution (design only - not implemented today)
+
+The system today runs as a single region, single Postgres primary, single Redis node (see section 1). The diagram below is the design-only evolution described in the table above, not a description of what is built.
+
+```mermaid
+flowchart LR
+    subgraph regionA ["Region A - home region for city BLR - evolution, not implemented"]
+      LBA["Load balancer A"]
+      APIA["API instances - region A"]
+      PGA[("PostgreSQL - region A")]
+      RDA[("Redis Cluster slots - city=BLR")]
+      LBA --> APIA
+      APIA --> PGA
+      APIA --> RDA
+    end
+
+    subgraph regionB ["Region B - home region for another city - evolution, not implemented"]
+      LBB["Load balancer B"]
+      APIB["API instances - region B"]
+      PGB[("PostgreSQL - region B")]
+      RDB[("Redis Cluster slots - other city")]
+      LBB --> APIB
+      APIB --> PGB
+      APIB --> RDB
+    end
+
+    PGA -.->|async replication - analytics/profile only| PGB
+    RDA -.->|no cross-region traffic - each city's geo data stays home| RDB
+```
+*Evolution / not implemented: rides are city-local, so a city's writes never leave its home region. Cross-region traffic is limited to async replication of analytics/profile data; `city` on drivers/quotes/rides is already the routing key that would drive this sharding.*
 
 ## 5. Security posture (assignment scope)
 
