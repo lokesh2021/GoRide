@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/newrelic/go-agent/v3/integrations/logcontext-v2/nrslog"
+
 	"github.com/lokeshbm/goride/internal/config"
 	"github.com/lokeshbm/goride/internal/drivers"
 	"github.com/lokeshbm/goride/internal/events"
@@ -26,7 +28,13 @@ import (
 
 func main() {
 	cfg := config.Load()
-	logger := newLogger(cfg.Env)
+
+	// The base handler (level + format) is built first so the observability
+	// bootstrap below can log through it. Once the New Relic app exists we
+	// rebuild the logger with the nrslog handler wrapped around this same base
+	// handler and re-SetDefault it — see the wrapping block after obs.New.
+	baseHandler := newBaseHandler(cfg.Env, cfg.LogLevel)
+	logger := slog.New(baseHandler)
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -39,9 +47,29 @@ func main() {
 	obs := observability.New(cfg, logger)
 	defer obs.Shutdown(10 * time.Second)
 
+	// New Relic Logs-in-Context: when the app is live, wrap the base handler so
+	// every slog line is forwarded to New Relic Logs and linked to the current
+	// transaction/trace. WrapHandler is itself nil-safe (returns the handler
+	// unchanged when app is nil), so the guard is belt-and-suspenders: with no
+	// license key the logger is byte-for-byte what it was before this change.
+	if obs != nil {
+		logger = slog.New(nrslog.WrapHandler(obs, baseHandler))
+		slog.SetDefault(logger)
+	}
+
+	// Single structured startup line. Only booleans/non-secret scalars are
+	// logged — never the New Relic license or PSP secret.
+	logger.Info(logMsgServerStarting,
+		"addr", cfg.Addr,
+		"env", cfg.Env,
+		"log_level", cfg.LogLevel,
+		"newrelic_enabled", obs != nil,
+		"slow_request_ms", cfg.SlowRequestMs,
+	)
+
 	st, err := store.New(ctx, cfg)
 	if err != nil {
-		logger.Error("failed to connect to store", "error", err)
+		logger.Error(logMsgStoreConnectFailed, "error", err)
 		os.Exit(1)
 	}
 	defer st.Close()
@@ -73,7 +101,7 @@ func main() {
 	rideSvc.MatchRequested = matchEngine.RequestMatch
 	rideSvc.OnDriverReleased = func(ctx context.Context, driverID string) {
 		if err := driverSvc.Release(ctx, driverID); err != nil {
-			logger.Warn("driver release failed", "error", err, "driver_id", driverID)
+			logger.Warn(logMsgDriverReleaseFailed, "error", err, "driver_id", driverID)
 		}
 	}
 
@@ -81,17 +109,18 @@ func main() {
 	matchEngine.Start(ctx)
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		Health:   st,
-		Store:    st,
-		Quotes:   quoteSvc,
-		Rides:    rideSvc,
-		Drivers:  driverSvc,
-		Match:    matchEngine,
-		Trips:    tripSvc,
-		Payments: paymentSvc,
-		Events:   eventHub,
-		Logger:   logger,
-		Obs:      obs,
+		Health:        st,
+		Store:         st,
+		Quotes:        quoteSvc,
+		Rides:         rideSvc,
+		Drivers:       driverSvc,
+		Match:         matchEngine,
+		Trips:         tripSvc,
+		Payments:      paymentSvc,
+		Events:        eventHub,
+		Logger:        logger,
+		Obs:           obs,
+		SlowRequestMs: cfg.SlowRequestMs,
 	})
 
 	srv := &http.Server{
@@ -106,31 +135,49 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("server starting", "addr", cfg.Addr, "env", cfg.Env)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server failed", "error", err)
+			logger.Error(logMsgServerFailed, "error", err)
 			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	logger.Info("shutdown signal received")
+	logger.Info(logMsgShutdownReceived)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", "error", err)
+		logger.Error(logMsgShutdownFailed, "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("server stopped cleanly")
+	logger.Info(logMsgServerStopped)
 }
 
-// newLogger emits JSON logs in prod-like envs and text logs in dev.
-func newLogger(env string) *slog.Logger {
+// newBaseHandler builds the base slog handler: JSON in prod-like envs, text in
+// dev, at the level parsed from GORIDE_LOG_LEVEL. In main this is optionally
+// wrapped by nrslog for New Relic Logs-in-Context; it is also the exact handler
+// used unchanged when monitoring is disabled.
+func newBaseHandler(env, level string) slog.Handler {
+	opts := &slog.HandlerOptions{Level: parseLogLevel(level)}
 	if env == "dev" {
-		return slog.New(slog.NewTextHandler(os.Stdout, nil))
+		return slog.NewTextHandler(os.Stdout, opts)
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	return slog.NewJSONHandler(os.Stdout, opts)
+}
+
+// parseLogLevel maps GORIDE_LOG_LEVEL values to slog levels, defaulting to Info
+// for anything unrecognized.
+func parseLogLevel(level string) slog.Level {
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
