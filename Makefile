@@ -2,8 +2,12 @@ GORIDE_PG_DSN ?= postgres://goride:goride@localhost:5432/goride?sslmode=disable
 
 .PHONY: run migrate migrate-down test test-integration vet tidy
 
+# Loads .env (gitignored) if present, so secrets like GORIDE_NEWRELIC_LICENSE
+# never live in tracked files or the shell history. Falls back to the default
+# DSN when .env is absent.
 run:
-	GORIDE_PG_DSN=$(GORIDE_PG_DSN) go run ./cmd/server
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+		GORIDE_PG_DSN=$${GORIDE_PG_DSN:-$(GORIDE_PG_DSN)} go run ./cmd/server
 
 migrate:
 	GORIDE_PG_DSN=$(GORIDE_PG_DSN) go run ./cmd/migrate up
