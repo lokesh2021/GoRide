@@ -9,7 +9,7 @@ Binding contracts for all backend work. If code and this spec disagree, fix the 
 - Money: integer paise (INR), never floats. Distances: meters (int). Durations: seconds (int).
 - Timestamps: `timestamptz`, UTC everywhere.
 - Errors over HTTP: `{"error": {"code": "SNAKE_CASE_CODE", "message": "human readable"}}` with correct status. Codes are stable API surface.
-- Config via env only (`GORIDE_` prefix): `GORIDE_ADDR`, `GORIDE_PG_DSN`, `GORIDE_REDIS_ADDR`, `GORIDE_ENV`, `GORIDE_NEWRELIC_LICENSE` (optional; agent disabled when empty).
+- Config via env only (`GORIDE_` prefix): `GORIDE_ADDR`, `GORIDE_PG_DSN`, `GORIDE_REDIS_ADDR`, `GORIDE_ENV`, `GORIDE_NEWRELIC_LICENSE` (optional; agent disabled when empty), `GORIDE_NEWRELIC_APP_NAME` (optional; defaults to `goride`).
 - Every request gets a request ID (middleware), logged with `log/slog` (JSON in prod, text in dev).
 - Single city for demo: `BLR`. City is a field on drivers/quotes/rides — never hardcode beyond defaults.
 

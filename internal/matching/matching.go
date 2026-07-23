@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/newrelic/go-agent/v3/newrelic"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
@@ -74,12 +75,22 @@ type Engine struct {
 	rides   *rides.Service
 	drivers *drivers.Service
 	log     *slog.Logger
+	// obs is the New Relic application used for the custom offer-latency
+	// metric and accept/decline/expire counters (see recordOffer*/offerNext/
+	// Accept/Decline/sweep below). Nil by default (and whenever monitoring is
+	// disabled) — every RecordCustomMetric call is a documented no-op on a
+	// nil *newrelic.Application, so this needs no separate guard.
+	obs *newrelic.Application
 }
 
 // NewEngine constructs a matching Engine.
 func NewEngine(st *store.Store, r *rides.Service, d *drivers.Service, log *slog.Logger) *Engine {
 	return &Engine{st: st, rides: r, drivers: d, log: log}
 }
+
+// SetObservability wires the New Relic application used for matching's custom
+// metrics. Optional: leaving it unset (nil) is a clean no-op.
+func (e *Engine) SetObservability(app *newrelic.Application) { e.obs = app }
 
 // ---- offer loop ----
 
@@ -148,6 +159,14 @@ func (e *Engine) offerNext(ctx context.Context, r *rideCtx) (bool, error) {
 		}
 		if !claimed {
 			continue // driver is holding another ride's offer
+		}
+
+		// tried is empty only on the very first successful claim for this ride
+		// (every subsequent offer adds its driver to the tried-set below), so
+		// this is exactly "the point the first offer is claimed for a ride" —
+		// report request→offer latency using the ride's created_at.
+		if len(tried) == 0 {
+			e.obs.RecordCustomMetric(metricOfferLatencyMs, float64(time.Since(r.CreatedAt).Milliseconds()))
 		}
 
 		if err := e.recordOffer(ctx, r.ID, driverID); err != nil {
@@ -269,6 +288,7 @@ func (e *Engine) Accept(ctx context.Context, driverID, rideID string) (*rides.Vi
 	if err := e.assignTx(ctx, rideID, driverID, string(otpHash)); err != nil {
 		return nil, err
 	}
+	e.obs.RecordCustomMetric(metricOfferAccepted, 1)
 
 	// Post-commit side effects. Read the driver card + city/tier for the mirror
 	// and the assignment event.
@@ -364,7 +384,11 @@ func (e *Engine) Decline(ctx context.Context, driverID, rideID string) error {
 			_ = e.st.Redis.Del(ctx, offerRide(rideID)).Err()
 		}
 	}
-	_ = held
+	// held == rideID confirms this driver actually held a live offer for this
+	// ride (vs. a stale/expired call) — only count a genuine decline.
+	if held == rideID {
+		e.obs.RecordCustomMetric(metricOfferDeclined, 1)
+	}
 
 	// Advance immediately if the ride is still matching.
 	r, err := e.loadRideCtx(ctx, rideID)
@@ -416,6 +440,10 @@ func (e *Engine) sweep(ctx context.Context) {
 		if now.Sub(r.CreatedAt) > matchDeadline {
 			if err := e.rides.Expire(ctx, r.ID); err != nil && !errors.Is(err, rides.ErrInvalidState) {
 				e.log.Warn(logMsgExpireFailed, "error", err, "ride_id", r.ID)
+			} else if err == nil {
+				// Candidates exhausted / 60s TTL passed with no accept — the
+				// ride's whole matching window expired unresolved.
+				e.obs.RecordCustomMetric(metricOfferExpired, 1)
 			}
 			continue
 		}

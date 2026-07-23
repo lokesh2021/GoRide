@@ -1,0 +1,35 @@
+-- Provision load-test identities used by loadtest/mixed.js.
+-- Idempotent: safe to run repeatedly. Remove with loadtest/clean_load.sql.
+--
+--   psql -d goride -f loadtest/seed_load.sql
+--   psql -d goride -v n_riders=20 -v n_drivers=50 -f loadtest/seed_load.sql
+
+\set n_riders  :{?n_riders}
+\set n_drivers :{?n_drivers}
+SELECT COALESCE(NULLIF(:'n_riders',  ''), '20')::int  AS n_riders  \gset
+SELECT COALESCE(NULLIF(:'n_drivers', ''), '50')::int  AS n_drivers \gset
+
+-- Deterministic UUIDs (2000…/3000… prefixes) so load scripts can address
+-- drivers by path id without a lookup: rider i = 20000000-…-<i>, driver i =
+-- 30000000-…-<i>.
+INSERT INTO riders (id, name, phone, api_token)
+SELECT ('20000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid,
+       'Load Rider ' || i,
+       '+9190000' || lpad(i::text, 5, '0'),
+       'riderload-' || i || '-token'
+FROM generate_series(1, :n_riders) AS i
+ON CONFLICT (api_token) DO NOTHING;
+
+INSERT INTO drivers (id, name, phone, city, tier, vehicle_model, plate, rating, status, api_token)
+SELECT ('30000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid,
+       'Load Driver ' || i,
+       '+9191000' || lpad(i::text, 5, '0'),
+       'BLR',
+       (ARRAY['mini','sedan','xl'])[1 + (i % 3)],
+       (ARRAY['Maruti Alto','Honda City','Toyota Innova'])[1 + (i % 3)],
+       'KA-05-LT-' || lpad(i::text, 4, '0'),
+       4.0 + (i % 10) / 10.0,
+       'offline',
+       'driverload-' || i || '-token'
+FROM generate_series(1, :n_drivers) AS i
+ON CONFLICT (api_token) DO NOTHING;

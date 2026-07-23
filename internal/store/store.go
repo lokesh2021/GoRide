@@ -8,6 +8,8 @@ import (
 	"runtime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/newrelic/go-agent/v3/integrations/nrpgx5"
+	nrredis "github.com/newrelic/go-agent/v3/integrations/nrredis-v9"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/lokeshbm/goride/internal/config"
@@ -21,6 +23,16 @@ type Store struct {
 
 // New connects to Postgres and Redis using cfg, sizing the pg pool relative
 // to available CPUs, and verifies both are reachable before returning.
+//
+// The pg pool always gets the nrpgx5 tracer and the Redis client always gets
+// the nrredis-v9 hook, unconditionally — neither needs an *newrelic.Application
+// reference here. Both integrations instead look up the transaction from each
+// call's own context via newrelic.FromContext at query time and no-op when
+// none is found there (no txn in context — e.g. background/sweeper work — or
+// monitoring disabled so no txn was ever started). That is what makes this
+// safe regardless of whether GORIDE_NEWRELIC_LICENSE is set: the request's
+// txn (attached by observability.Middleware) rides along on ctx, and queries
+// made without one are simply untraced, never broken.
 func New(ctx context.Context, cfg config.Config) (*Store, error) {
 	pgCfg, err := pgxpool.ParseConfig(cfg.PGDSN)
 	if err != nil {
@@ -36,13 +48,16 @@ func New(ctx context.Context, cfg config.Config) (*Store, error) {
 	pgCfg.MaxConnLifetime = pgMaxConnLifetime
 	pgCfg.MaxConnIdleTime = pgMaxConnIdleTime
 	pgCfg.HealthCheckPeriod = pgHealthCheckPeriod
+	pgCfg.ConnConfig.Tracer = nrpgx5.NewTracer()
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: create pg pool: %w", err)
 	}
 
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	redisOpts := &redis.Options{Addr: cfg.RedisAddr}
+	rdb := redis.NewClient(redisOpts)
+	rdb.AddHook(nrredis.NewHook(redisOpts))
 
 	s := &Store{PG: pool, Redis: rdb}
 

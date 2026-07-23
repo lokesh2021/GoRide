@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/newrelic/go-agent/v3/newrelic"
 
 	"github.com/lokeshbm/goride/internal/rides"
 	"github.com/lokeshbm/goride/internal/store"
@@ -50,6 +51,11 @@ type Service struct {
 	psp    *PSP
 	secret string
 	log    *slog.Logger
+	// obs is the New Relic application used for the success/failure custom
+	// metrics (see applySuccess/applyFailure). Nil by default (and whenever
+	// monitoring is disabled) — RecordCustomMetric is a documented no-op on a
+	// nil *newrelic.Application, so this needs no separate guard.
+	obs *newrelic.Application
 }
 
 // NewService constructs a payments Service. The rides service supplies the
@@ -58,6 +64,10 @@ type Service struct {
 func NewService(st *store.Store, r *rides.Service, psp *PSP, secret string, log *slog.Logger) *Service {
 	return &Service{st: st, rides: r, psp: psp, secret: secret, log: log}
 }
+
+// SetObservability wires the New Relic application used for payments' custom
+// metrics. Optional: leaving it unset (nil) is a clean no-op.
+func (s *Service) SetObservability(app *newrelic.Application) { s.obs = app }
 
 // ---- trigger ----
 
@@ -228,6 +238,7 @@ func (s *Service) applySuccess(ctx context.Context, pspRef, rideID string) error
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("payments: success commit: %w", err)
 	}
+	s.obs.RecordCustomMetric(metricPaymentSucceeded, 1)
 
 	s.publishPaymentUpdated(ctx, rideID, StatusSucceeded, 0)
 	return nil
@@ -248,6 +259,7 @@ func (s *Service) applyFailure(ctx context.Context, pspRef, rideID string) error
 	if err != nil {
 		return fmt.Errorf("payments: failure update: %w", err)
 	}
+	s.obs.RecordCustomMetric(metricPaymentFailed, 1)
 	s.publishPaymentUpdated(ctx, rideID, StatusFailed, retryCount)
 	return nil
 }

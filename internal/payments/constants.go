@@ -36,6 +36,13 @@ const (
 
 const eventPaymentUpdated = "payment.updated"
 
+// ---- custom metrics (New Relic; see Service.obs) ----
+
+const (
+	metricPaymentSucceeded = "Custom/Payments/Succeeded"
+	metricPaymentFailed    = "Custom/Payments/Failed"
+)
+
 // ---- log messages ----
 
 const (
