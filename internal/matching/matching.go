@@ -58,15 +58,24 @@ type offerState struct {
 	ExpiresAt int64  `json:"expires_at"` // Unix seconds
 }
 
-// rideCtx is the minimal ride view the offer loop needs.
+// rideCtx is the ride view the offer loop needs: routing fields for candidate
+// search plus the offer-card fields a driver sees before accepting (quoted
+// fare for the booked tier, trip drop/distance/duration, rider identity).
 type rideCtx struct {
-	ID        string
-	Tier      string
-	PickupLat float64
-	PickupLng float64
-	City      string
-	Status    string
-	CreatedAt time.Time
+	ID         string
+	Tier       string
+	PickupLat  float64
+	PickupLng  float64
+	DropLat    float64
+	DropLng    float64
+	City       string
+	Status     string
+	CreatedAt  time.Time
+	FarePaise  int
+	DistanceM  int
+	DurationS  int
+	RiderName  string
+	RiderStars float64
 }
 
 // Engine is the matching engine.
@@ -100,10 +109,18 @@ func (e *Engine) loadRideCtx(ctx context.Context, rideID string) (*rideCtx, erro
 	var r rideCtx
 	r.ID = rideID
 	err := e.st.PG.QueryRow(ctx, `
-		SELECT r.tier, r.pickup_lat, r.pickup_lng, r.status, r.created_at, q.city
-		FROM rides r JOIN quotes q ON q.id = r.quote_id
+		SELECT r.tier, r.pickup_lat, r.pickup_lng, r.drop_lat, r.drop_lng,
+		       r.status, r.created_at, q.city,
+		       COALESCE((q.prices->>r.tier)::int, 0), q.distance_m, q.duration_s,
+		       ri.name, ri.rating
+		FROM rides r
+		JOIN quotes q ON q.id = r.quote_id
+		JOIN riders ri ON ri.id = r.rider_id
 		WHERE r.id = $1`, rideID,
-	).Scan(&r.Tier, &r.PickupLat, &r.PickupLng, &r.Status, &r.CreatedAt, &r.City)
+	).Scan(&r.Tier, &r.PickupLat, &r.PickupLng, &r.DropLat, &r.DropLng,
+		&r.Status, &r.CreatedAt, &r.City,
+		&r.FarePaise, &r.DistanceM, &r.DurationS,
+		&r.RiderName, &r.RiderStars)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -174,11 +191,18 @@ func (e *Engine) offerNext(ctx context.Context, r *rideCtx) (bool, error) {
 		}
 		expiresAt := time.Now().Add(offerTTL)
 		if err := e.rides.PublishDriver(ctx, driverID, eventRideOffer, map[string]any{
-			"ride_id":    r.ID,
-			"tier":       r.Tier,
-			"pickup_lat": r.PickupLat,
-			"pickup_lng": r.PickupLng,
-			"expires_at": expiresAt.UTC().Format(time.RFC3339),
+			"ride_id":      r.ID,
+			"tier":         r.Tier,
+			"pickup_lat":   r.PickupLat,
+			"pickup_lng":   r.PickupLng,
+			"drop_lat":     r.DropLat,
+			"drop_lng":     r.DropLng,
+			"fare":         r.FarePaise,
+			"distance_m":   r.DistanceM,
+			"duration_s":   r.DurationS,
+			"rider_name":   r.RiderName,
+			"rider_rating": r.RiderStars,
+			"expires_at":   expiresAt.UTC().Format(time.RFC3339),
 		}); err != nil {
 			e.log.Warn(logMsgPublishOfferFailed, "error", err, "driver_id", driverID)
 		}
@@ -471,8 +495,13 @@ func (e *Engine) claimMatchingBatch(ctx context.Context) ([]rideCtx, error) {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	pgRows, err := tx.Query(ctx, `
-		SELECT r.id, r.tier, r.pickup_lat, r.pickup_lng, q.city, r.created_at
-		FROM rides r JOIN quotes q ON q.id = r.quote_id
+		SELECT r.id, r.tier, r.pickup_lat, r.pickup_lng, r.drop_lat, r.drop_lng,
+		       q.city, r.created_at,
+		       COALESCE((q.prices->>r.tier)::int, 0), q.distance_m, q.duration_s,
+		       ri.name, ri.rating
+		FROM rides r
+		JOIN quotes q ON q.id = r.quote_id
+		JOIN riders ri ON ri.id = r.rider_id
 		WHERE r.status = 'MATCHING'
 		ORDER BY r.created_at
 		FOR UPDATE OF r SKIP LOCKED
@@ -484,7 +513,9 @@ func (e *Engine) claimMatchingBatch(ctx context.Context) ([]rideCtx, error) {
 	for pgRows.Next() {
 		var r rideCtx
 		r.Status = string(rides.StatusMatching)
-		if err := pgRows.Scan(&r.ID, &r.Tier, &r.PickupLat, &r.PickupLng, &r.City, &r.CreatedAt); err != nil {
+		if err := pgRows.Scan(&r.ID, &r.Tier, &r.PickupLat, &r.PickupLng, &r.DropLat, &r.DropLng,
+			&r.City, &r.CreatedAt, &r.FarePaise, &r.DistanceM, &r.DurationS,
+			&r.RiderName, &r.RiderStars); err != nil {
 			pgRows.Close()
 			return nil, fmt.Errorf("matching: sweep scan: %w", err)
 		}

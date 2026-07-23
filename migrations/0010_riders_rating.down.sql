@@ -1,0 +1,1 @@
+ALTER TABLE riders DROP COLUMN rating;
