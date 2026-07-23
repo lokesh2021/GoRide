@@ -214,15 +214,24 @@ func (s *Service) Cancel(ctx context.Context, id, actorID, actorRole, reason str
 		return nil, ErrForbidden
 	}
 
+	// The driver to release is re-read INSIDE the transaction, not taken from
+	// the authorization snapshot above: an Accept can commit between that
+	// SELECT and our guarded status UPDATE (CANCELLED_* is legal from
+	// DRIVER_ASSIGNED), and the snapshot's nil driver_id would then skip
+	// freeing the just-assigned driver, orphaning them on_trip. By the time
+	// mutate runs, updateStatus's UPDATE holds the row lock, so this read is
+	// race-free.
+	var lockedDriverID *string
 	mutate := func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`UPDATE rides SET cancel_reason = $1 WHERE id = $2`, nullIfEmpty(reason), id,
-		); err != nil {
+		if err := tx.QueryRow(ctx,
+			`UPDATE rides SET cancel_reason = $1 WHERE id = $2 RETURNING driver_id`,
+			nullIfEmpty(reason), id,
+		).Scan(&lockedDriverID); err != nil {
 			return err
 		}
-		if driverID != nil {
+		if lockedDriverID != nil {
 			if _, err := tx.Exec(ctx,
-				`UPDATE drivers SET status = 'available' WHERE id = $1`, *driverID,
+				`UPDATE drivers SET status = 'available' WHERE id = $1 AND status = 'on_trip'`, *lockedDriverID,
 			); err != nil {
 				return err
 			}
@@ -235,8 +244,8 @@ func (s *Service) Cancel(ctx context.Context, id, actorID, actorRole, reason str
 	}
 
 	// Post-commit seam: geo re-add of the released driver is M3's concern.
-	if driverID != nil {
-		s.OnDriverReleased(ctx, *driverID)
+	if lockedDriverID != nil {
+		s.OnDriverReleased(ctx, *lockedDriverID)
 	}
 
 	return s.load(ctx, id)
