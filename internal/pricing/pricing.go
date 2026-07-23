@@ -79,6 +79,44 @@ func Fare(rates TierRates, distanceM, durationS, surgeX100 int) int {
 	return int(rupees) * 100
 }
 
+// Breakdown is the itemised final-fare breakdown written to the trip row and
+// copied (immutably) into the receipt. The base/distance/time components are
+// pre-surge paise; SurgeX100 is the quoted multiplier (×100) applied to their
+// sum; Total is the final fare rounded to the nearest rupee.
+type Breakdown struct {
+	Base              int `json:"base"`
+	DistanceComponent int `json:"distance_component"`
+	TimeComponent     int `json:"time_component"`
+	SurgeX100         int `json:"surge_x100"`
+	Total             int `json:"total"`
+}
+
+// FinalFare computes the itemised actual fare on trip end: the pre-surge base,
+// distance, and time components (each rounded to whole paise for display), the
+// quoted surge multiplier, and the surge-applied total rounded to the nearest
+// rupee. The surge and rates are always the ones locked at quote time — never a
+// live re-read (SPEC "Final fare"). Total is derived from the rounded components
+// so the receipt's line items always sum (× surge) back to the total.
+func FinalFare(rates TierRates, distanceM, durationS, surgeX100 int) Breakdown {
+	km := float64(distanceM) / 1000.0
+	mins := float64(durationS) / 60.0
+
+	base := rates.BasePaise
+	dist := int(math.Round(km * float64(rates.PerKmPaise)))
+	tm := int(math.Round(mins * float64(rates.PerMinPaise)))
+
+	surged := float64(base+dist+tm) * float64(surgeX100) / 100.0
+	total := int(math.Round(surged/100.0)) * 100
+
+	return Breakdown{
+		Base:              base,
+		DistanceComponent: dist,
+		TimeComponent:     tm,
+		SurgeX100:         surgeX100,
+		Total:             total,
+	}
+}
+
 // Prices computes the per-tier fare map (tier → paise) for a leg and surge.
 func Prices(distanceM, durationS, surgeX100 int) map[string]int {
 	out := make(map[string]int, len(Tiers))
