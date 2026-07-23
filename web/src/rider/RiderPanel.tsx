@@ -16,7 +16,7 @@ import type {
 } from "../api/types";
 import type { RiderPersona } from "../config/personas";
 import { PLACES, RIDERS, placeName } from "../config/personas";
-import { bearing, buildRoute, formatDuration, formatKm, type LatLng } from "../lib/geo";
+import { bearing, buildRoute, formatDuration, formatKm, haversine, type LatLng } from "../lib/geo";
 import { rupees, surgeLabel } from "../lib/money";
 import { fetchRoad } from "../lib/routing";
 import { MapView, type BotMarker } from "../map/MapView";
@@ -85,6 +85,7 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [collapsed, setCollapsed] = useState(false); // overlay card minimized
 
   const prevDriverPos = useRef<LatLng | null>(null);
 
@@ -154,7 +155,11 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
           case "ride.driver_location": {
             const d = env.data as DriverLocationData;
             const pos: LatLng = [d.lat, d.lng];
-            if (prevDriverPos.current) setDriverBrg(bearing(prevDriverPos.current, pos));
+            // Only re-bear on real movement (>3 m) so the marker doesn't spin
+            // on GPS jitter while the car is effectively stationary.
+            if (prevDriverPos.current && haversine(prevDriverPos.current, pos) > 3) {
+              setDriverBrg(bearing(prevDriverPos.current, pos));
+            }
             prevDriverPos.current = pos;
             setDriverPos(pos);
             break;
@@ -411,10 +416,25 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
         </select>
       </label>
 
-      <div className="float-card bottom-left">
+      <div className={`float-card bottom-left ${collapsed ? "collapsed" : ""}`}>
+        {!booting && (
+          <button
+            type="button"
+            className="card-min"
+            aria-label={collapsed ? "Expand" : "Minimize"}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((c) => !c)}
+          >
+            <ChevronIcon />
+          </button>
+        )}
         {booting ? (
           <PanelShimmer />
-        ) : showHistory ? (
+        ) : collapsed ? (
+          <RiderCollapsed ride={ride} status={status} showHistory={showHistory} />
+        ) : (
+        <div className="card-body">
+        {showHistory ? (
           <HistoryView items={history} loading={historyLoading} onBack={() => setShowHistory(false)} />
         ) : !ride ? (
           <PlanView
@@ -457,6 +477,8 @@ export function RiderPanel({ persona, onPersonaChange, onPickupChange, bots }: P
           />
         ) : (
           <FindingView onCancel={() => setConfirmCancel(true)} />
+        )}
+        </div>
         )}
       </div>
 
@@ -504,6 +526,57 @@ function PanelShimmer() {
       <div className="sk sk-line" />
       <div className="sk sk-row" />
       <div className="sk sk-btn" />
+    </div>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+// One-line summary shown when the rider's card is minimized. No action is
+// surfaced — the rider has nothing to do while simply tracking the car.
+function RiderCollapsed({
+  ride,
+  status,
+  showHistory,
+}: {
+  ride: RideView | null;
+  status: RideStatus | null;
+  showHistory: boolean;
+}) {
+  let text: string;
+  if (showHistory) {
+    text = "Ride history";
+  } else if (!ride || !status) {
+    text = "Plan your ride";
+  } else if (status === "COMPLETED") {
+    text = `Trip completed · ${rupees(ride.fare_total ?? 0)}`;
+  } else if (status === "EXPIRED") {
+    text = "No drivers available";
+  } else if (status.startsWith("CANCELLED")) {
+    text = "Ride cancelled";
+  } else if ((STATUS_RANK[status] ?? 0) >= 1) {
+    const heading =
+      status === "IN_PROGRESS"
+        ? "On your way"
+        : status === "ARRIVED"
+          ? "Driver has arrived"
+          : status === "DRIVER_ARRIVING"
+            ? "Driver on the way"
+            : "Driver assigned";
+    const d = ride.driver;
+    text = d ? `${heading} · ${d.name} · ★${d.rating.toFixed(1)}` : heading;
+  } else {
+    text = "Finding your driver…";
+  }
+  return (
+    <div className="collapse-summary">
+      <span className="cs-text">{text}</span>
     </div>
   );
 }

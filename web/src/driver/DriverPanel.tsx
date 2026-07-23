@@ -4,7 +4,7 @@ import type { OfferData, RideStatus, RideView, SSEEnvelope, StatusChangedData } 
 import type { DriverPersona } from "../config/personas";
 import { DRIVERS, placeName } from "../config/personas";
 import { playChirp, startTitleFlash, stopTitleFlash } from "../lib/alerts";
-import { buildRoute, haversine, pointAtDistance, routeLength, type LatLng } from "../lib/geo";
+import { buildRoute, cumulativeDistances, haversine, pointAtDistanceCum, type LatLng } from "../lib/geo";
 import { rupees } from "../lib/money";
 import { fetchRoad } from "../lib/routing";
 import { MapView, type BotMarker } from "../map/MapView";
@@ -39,8 +39,17 @@ type Phase = "idle" | "to_pickup" | "at_pickup" | "to_drop";
 interface Leg {
   phase: Phase;
   pts: LatLng[];
+  cum: number[]; // cumulative distance per vertex (precomputed once per leg)
+  cumTotal: number; // total leg length in metres
   driven: number; // metres advanced from the leg start
   speedMps: number; // realistic speed for ETA (OSRM-derived when available)
+}
+
+// Build a Leg with its cumulative-distance index precomputed (O(1)-ish
+// per-frame lookups during the 60fps drive loop).
+function makeLeg(phase: Phase, pts: LatLng[], driven: number, speedMps: number): Leg {
+  const cum = cumulativeDistances(pts);
+  return { phase, pts, cum, cumTotal: cum[cum.length - 1] ?? 0, driven, speedMps };
 }
 
 function phaseFor(status: RideStatus | null): Phase {
@@ -63,6 +72,8 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
 
   const [online, setOnline] = useState(false);
   const [pos, setPos] = useState<LatLng>([12.9756, 77.6068]); // MG Road
+  const [carBrg, setCarBrg] = useState(0); // heading of the car glyph
+  const [collapsed, setCollapsed] = useState(false); // overlay card minimized
   const [ride, setRide] = useState<RideView | null>(null);
   const [status, setStatus] = useState<RideStatus | null>(null);
   const [offer, setOffer] = useState<OfferData | null>(null);
@@ -242,7 +253,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
 
     // Immediate local fallback so the car never stalls waiting on the network.
     const fallback = buildRoute(from, to);
-    legRef.current = { phase, pts: fallback, driven: 0, speedMps: CITY_SPEED_MPS };
+    legRef.current = makeLeg(phase, fallback, 0, CITY_SPEED_MPS);
     setLegPath(fallback);
 
     let cancelled = false;
@@ -251,7 +262,7 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
       const cur = legRef.current;
       if (!cur || cur.phase !== phase) return; // moved on to another leg
       const speed = road.distanceM > 0 && road.durationS > 0 ? road.distanceM / road.durationS : CITY_SPEED_MPS;
-      legRef.current = { phase, pts: road.path, driven: cur.driven, speedMps: speed };
+      legRef.current = makeLeg(phase, road.path, cur.driven, speed);
       setLegPath(road.path);
     });
     return () => {
@@ -359,7 +370,44 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
     sentRef.current = { arriving: false, arrived: false };
   }, []);
 
-  // ---- 1s driving + ping loop (follows the OSRM/fallback polyline) ----
+  // ---- 60fps motion loop (renders the car gliding along the polyline) ----
+  // Render motion is decoupled from the network tick below: this rAF loop only
+  // advances the car and rotates it; it never touches the network.
+  useEffect(() => {
+    if (!online) return;
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      let dt = (now - last) / 1000;
+      last = now;
+      if (dt > 1.5) dt = 1.5; // clamp: don't teleport after a backgrounded tab
+
+      const ph = phaseFor(statusRef.current);
+      const leg = legRef.current;
+      // Motion is paused for idle / at_pickup — only drive on the two legs.
+      if ((ph === "to_pickup" || ph === "to_drop") && leg && leg.phase === ph && leg.pts.length > 1) {
+        leg.driven = Math.min(leg.cumTotal, leg.driven + DRIVE_SPEED_M * dt);
+        const { pos: next, brg } = pointAtDistanceCum(leg.pts, leg.cum, leg.driven);
+        posRef.current = next;
+        setPos(next);
+        setCarBrg(brg);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    // Resume cleanly when the tab returns — reset the clock so the clamped dt
+    // above never produces a jump.
+    const onVis = () => {
+      if (!document.hidden) last = performance.now();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [online]);
+
+  // ---- 1s network tick (location ping + autopilot arriving/arrived + ETA) ----
   useEffect(() => {
     if (!online) return;
     const iv = setInterval(() => {
@@ -368,25 +416,18 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
       const ph = phaseFor(st);
       const leg = legRef.current;
 
-      if (r && (ph === "to_pickup" || ph === "to_drop") && leg && leg.phase === ph && leg.pts.length > 1) {
-        leg.driven += DRIVE_SPEED_M;
-        const { pos: next } = pointAtDistance(leg.pts, leg.driven);
-        posRef.current = next;
-        setPos(next);
-
-        if (ph === "to_pickup") {
-          const remaining = Math.max(0, routeLength(leg.pts) - leg.driven);
-          setEta(Math.round(remaining / (leg.speedMps || CITY_SPEED_MPS)));
-          if (autopilotRef.current) {
-            const dp = haversine(next, [r.pickup_lat, r.pickup_lng]);
-            if (dp < NEAR_PICKUP_M * 1.6 && st === "DRIVER_ASSIGNED" && !sentRef.current.arriving) {
-              sentRef.current.arriving = true;
-              api.arriving(r.id).catch(() => {});
-            }
-            if (dp < NEAR_PICKUP_M && (st === "DRIVER_ARRIVING" || st === "DRIVER_ASSIGNED") && !sentRef.current.arrived) {
-              sentRef.current.arrived = true;
-              setTimeout(() => api.arrived(r.id).catch(() => {}), 1000);
-            }
+      if (r && ph === "to_pickup" && leg && leg.phase === ph && leg.pts.length > 1) {
+        const remaining = Math.max(0, leg.cumTotal - leg.driven);
+        setEta(Math.round(remaining / (leg.speedMps || CITY_SPEED_MPS)));
+        if (autopilotRef.current) {
+          const dp = haversine(posRef.current, [r.pickup_lat, r.pickup_lng]);
+          if (dp < NEAR_PICKUP_M * 1.6 && st === "DRIVER_ASSIGNED" && !sentRef.current.arriving) {
+            sentRef.current.arriving = true;
+            api.arriving(r.id).catch(() => {});
+          }
+          if (dp < NEAR_PICKUP_M && (st === "DRIVER_ARRIVING" || st === "DRIVER_ASSIGNED") && !sentRef.current.arrived) {
+            sentRef.current.arrived = true;
+            setTimeout(() => api.arrived(r.id).catch(() => {}), 1000);
           }
         }
       }
@@ -399,11 +440,18 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
   // ---- map props ----
   const route = ride ? legPath : null;
 
+  // Fit to the leg geometry (origin + pickup + drop), NOT the live car position
+  // — the car glides at 60fps and would otherwise re-fit the map every frame.
+  // Keeping the car on-screen is CarFollow's job (throttled panInside).
   const fitPoints = useMemo<LatLng[]>(() => {
-    const pts: LatLng[] = [pos];
-    if (ride) pts.push([ride.pickup_lat, ride.pickup_lng], [ride.drop_lat, ride.drop_lng]);
+    if (!ride) return [pos];
+    const pts: LatLng[] = [
+      [ride.pickup_lat, ride.pickup_lng],
+      [ride.drop_lat, ride.drop_lng],
+    ];
+    if (legPath && legPath.length > 0) pts.push(legPath[0]);
     return pts;
-  }, [pos, ride]);
+  }, [pos, ride, legPath]);
 
   const offerKm = offer ? (haversine(pos, [offer.pickup_lat, offer.pickup_lng]) / 1000).toFixed(1) : "0";
 
@@ -420,6 +468,8 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
           drop={ride ? [ride.drop_lat, ride.drop_lng] : null}
           route={route}
           car={pos}
+          carBearing={carBrg}
+          animateCar={false}
           bots={bots}
           fitPoints={fitPoints}
         />
@@ -482,35 +532,59 @@ export function DriverPanel({ persona, onPersonaChange, lastRiderPickup, bots }:
         </div>
       )}
 
-      <div className="float-card bottom-right">
+      <div className={`float-card bottom-right ${collapsed ? "collapsed" : ""}`}>
+        {!booting && (
+          <button
+            type="button"
+            className="card-min"
+            aria-label={collapsed ? "Expand" : "Minimize"}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((c) => !c)}
+          >
+            <ChevronIcon />
+          </button>
+        )}
         {booting ? (
           <PanelShimmer />
-        ) : !ride ? (
-          <OnlineView
-            online={online}
-            busy={busy}
-            onToggle={goOnline}
-            persona={persona}
-            canJump={!!lastRiderPickup && !online}
-            onJumpToPickup={() => lastRiderPickup && setPos(lastRiderPickup)}
-            autopilot={autopilot}
-            setAutopilot={setAutopilot}
-          />
-        ) : (
-          <ActiveDriveView
+        ) : collapsed ? (
+          <DriverCollapsed
             ride={ride}
-            status={status}
             phase={phase}
-            otpInput={otpInput}
-            setOtpInput={setOtpInput}
-            busy={busy}
-            autopilot={autopilot}
+            online={online}
             eta={eta}
-            onArriving={doArriving}
-            onArrived={doArrived}
-            onStart={startTrip}
+            busy={busy}
             onEnd={() => setConfirm("end")}
           />
+        ) : (
+          <div className="card-body">
+            {!ride ? (
+              <OnlineView
+                online={online}
+                busy={busy}
+                onToggle={goOnline}
+                persona={persona}
+                canJump={!!lastRiderPickup && !online}
+                onJumpToPickup={() => lastRiderPickup && setPos(lastRiderPickup)}
+                autopilot={autopilot}
+                setAutopilot={setAutopilot}
+              />
+            ) : (
+              <ActiveDriveView
+                ride={ride}
+                status={status}
+                phase={phase}
+                otpInput={otpInput}
+                setOtpInput={setOtpInput}
+                busy={busy}
+                autopilot={autopilot}
+                eta={eta}
+                onArriving={doArriving}
+                onArrived={doArrived}
+                onStart={startTrip}
+                onEnd={() => setConfirm("end")}
+              />
+            )}
+          </div>
         )}
       </div>
 
@@ -561,6 +635,66 @@ function PanelShimmer() {
       <div className="sk sk-line" />
       <div className="sk sk-row" />
       <div className="sk sk-btn" />
+    </div>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+// One-line summary shown when the driver's card is minimized, keeping the map
+// unobstructed while preserving the single most important action (End trip).
+function DriverCollapsed({
+  ride,
+  phase,
+  online,
+  eta,
+  busy,
+  onEnd,
+}: {
+  ride: RideView | null;
+  phase: Phase;
+  online: boolean;
+  eta: number | null;
+  busy: string | null;
+  onEnd: () => void;
+}) {
+  if (!ride) {
+    return (
+      <div className="collapse-summary">
+        <span className="cs-text">
+          {online ? "You're online" : "You're offline"}
+          <span className="cs-dim">{online ? " · waiting for offers" : ""}</span>
+        </span>
+      </div>
+    );
+  }
+  const fare = ride.fare_total != null ? rupees(ride.fare_total) : "—";
+  if (phase === "to_drop") {
+    return (
+      <div className="collapse-summary">
+        <span className="cs-text">
+          Trip in progress <span className="cs-dim">· {fare}</span>
+        </span>
+        <button className="btn primary" onClick={onEnd} disabled={busy !== null}>
+          {busy === "end" ? <Spinner label="Ending…" /> : "End trip"}
+        </button>
+      </div>
+    );
+  }
+  const etaMin = eta != null ? Math.max(1, Math.round(eta / 60)) : null;
+  const label = phase === "at_pickup" ? "Verify OTP to start" : phase === "to_pickup" ? "Head to pickup" : "Active ride";
+  return (
+    <div className="collapse-summary">
+      <span className="cs-text">
+        {label}
+        {etaMin != null && phase === "to_pickup" && <span className="cs-dim"> · ~{etaMin} min</span>}
+      </span>
     </div>
   );
 }
