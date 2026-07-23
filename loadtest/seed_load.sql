@@ -1,11 +1,12 @@
--- Provision load-test identities used by loadtest/mixed.js: 20 riders,
--- 50 drivers. Idempotent: safe to run repeatedly. Remove with
--- loadtest/clean_load.sql.
+-- Provision load-test identities: 20 riders, 200 drivers. Idempotent: safe to
+-- run repeatedly. Remove with loadtest/clean_load.sql.
+-- mixed.js uses the first 50 drivers / 20 riders; capacity.js uses the full
+-- pool so per-driver ping rate stays under the 3/s limiter during ramps.
 --
 --   psql -d goride -f loadtest/seed_load.sql
 
 \set n_riders  20
-\set n_drivers 50
+\set n_drivers 200
 
 -- Deterministic UUIDs (2000…/3000… prefixes) so load scripts can address
 -- drivers by path id without a lookup: rider i = 20000000-…-<i>, driver i =
