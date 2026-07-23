@@ -1,0 +1,175 @@
+{
+  "name": "GoRide — API Performance",
+  "description": "Latency, throughput, errors, DB time and custom matching/payment metrics for the goride APM app. Import via Dashboards → Import dashboard. Replace every \"accountIds\": [0] with your New Relic account id first (see docs/newrelic-setup.md §5).",
+  "permissions": "PUBLIC_READ_WRITE",
+  "pages": [
+    {
+      "name": "GoRide API",
+      "description": "Hot-path latency and reliability for the assignment's graded surfaces.",
+      "widgets": [
+        {
+          "title": "Headline SLIs (p95 / throughput / error %)",
+          "layout": { "column": 1, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.billboard" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT percentile(duration, 95) * 1000 AS 'p95 (ms)', rate(count(*), 1 minute) AS 'Throughput (rpm)', percentage(count(*), WHERE error IS true) AS 'Error %' FROM Transaction WHERE appName = 'goride' SINCE 30 minutes ago"
+              }
+            ],
+            "thresholds": [
+              { "alertSeverity": "WARNING", "value": 150 },
+              { "alertSeverity": "CRITICAL", "value": 250 }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Throughput (requests / min)",
+          "layout": { "column": 5, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT rate(count(*), 1 minute) FROM Transaction WHERE appName = 'goride' TIMESERIES SINCE 30 minutes ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Error rate %",
+          "layout": { "column": 9, "row": 1, "width": 4, "height": 3 },
+          "visualization": { "id": "viz.billboard" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT percentage(count(*), WHERE error IS true) AS 'Error %' FROM Transaction WHERE appName = 'goride' SINCE 30 minutes ago"
+              }
+            ],
+            "thresholds": [
+              { "alertSeverity": "WARNING", "value": 1 },
+              { "alertSeverity": "CRITICAL", "value": 5 }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Latency per endpoint — p50 / p95 / p99 (ms)",
+          "layout": { "column": 1, "row": 4, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT percentile(duration, 50, 95, 99) * 1000 AS 'ms', count(*) AS 'requests' FROM Transaction WHERE appName = 'goride' FACET name SINCE 30 minutes ago LIMIT 20"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "p95 latency over time, by endpoint",
+          "layout": { "column": 7, "row": 4, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT percentile(duration, 95) * 1000 AS 'p95 (ms)' FROM Transaction WHERE appName = 'goride' FACET name TIMESERIES SINCE 30 minutes ago LIMIT 10"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Most time-consuming transactions (total wall time)",
+          "layout": { "column": 1, "row": 7, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.bar" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT sum(duration) AS 'total seconds' FROM Transaction WHERE appName = 'goride' FACET name SINCE 30 minutes ago LIMIT 15"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Database time per endpoint (bottleneck view)",
+          "layout": { "column": 7, "row": 7, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT average(databaseDuration) * 1000 AS 'avg DB (ms)', average(duration) * 1000 AS 'avg total (ms)' FROM Transaction WHERE appName = 'goride' FACET name SINCE 30 minutes ago LIMIT 20"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "DB time vs total time (app vs datastore)",
+          "layout": { "column": 1, "row": 10, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT average(databaseDuration) * 1000 AS 'DB (ms)', average(duration) * 1000 AS 'Total (ms)' FROM Transaction WHERE appName = 'goride' TIMESERIES SINCE 30 minutes ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Matching offer latency — Custom/Matching/OfferLatencyMs (target < 1000ms)",
+          "layout": { "column": 7, "row": 10, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT average(newrelic.timeslice.value) * 1000 AS 'avg offer latency (ms)', percentile(newrelic.timeslice.value, 95) * 1000 AS 'p95 (ms)' FROM Metric WHERE metricTimesliceName = 'Custom/Matching/OfferLatencyMs' AND appName = 'goride' TIMESERIES SINCE 30 minutes ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Offer outcomes (accepted / declined / expired)",
+          "layout": { "column": 1, "row": 13, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.bar" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT sum(newrelic.timeslice.value) AS 'count' FROM Metric WHERE metricTimesliceName IN ('Custom/Matching/OfferAccepted', 'Custom/Matching/OfferDeclined', 'Custom/Matching/OfferExpired') AND appName = 'goride' FACET metricTimesliceName SINCE 30 minutes ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Payment outcomes (succeeded / failed)",
+          "layout": { "column": 7, "row": 13, "width": 6, "height": 3 },
+          "visualization": { "id": "viz.bar" },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [0],
+                "query": "SELECT sum(newrelic.timeslice.value) AS 'count' FROM Metric WHERE metricTimesliceName IN ('Custom/Payments/Succeeded', 'Custom/Payments/Failed') AND appName = 'goride' FACET metricTimesliceName SINCE 30 minutes ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        }
+      ]
+    }
+  ]
+}
